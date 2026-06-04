@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-04-30T16:22:42.307616",
+  "torihikisaki_code": "T1201",
+  "registered_count": 6,
+  "registered": [
+    {
+      "code": "9100",
+      "name": "Amazon.co.jp TPB5（ファイズオペレーションズ㈱ 青梅）"
+    },
+    {
+      "code": "9101",
+      "name": "Amazon.co.jp TPB9（ESR 戸田）"
+    },
+    {
+      "code": "9102",
+      "name": "Amazon.co.jp TPB6（ESR川西 DC）"
+    },
+    {
+      "code": "9103",
+      "name": "Amazon.co.jp TPB2（Landport上尾Ⅰ）"
+    },
+    {
+      "code": "9104",
+      "name": "Amazon.co.jp TPB7（ロジスクエアふじみ野B棟）"
+    },
+    {
+      "code": "9105",
+      "name": "Amazon.co.jp TPB8（ランドポート東海大府Ⅰ EAST 1F）"
+    }
+  ],
+  "errors": []
+}

@@ -1,0 +1,7 @@
+.env
+.api_key
+output/
+__pycache__/
+*.pyc
+.claude/
+.claude/
