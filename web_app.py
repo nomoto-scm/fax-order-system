@@ -37,7 +37,7 @@ from ocr_module import (
     match_ddc, match_product, load_staff, ocr_fax_page, normalize, normalize_company,
     _ddc_row_to_dict,
 )
-from process_fax import generate_pdfs, results_to_excel, results_to_csv, results_to_ne_csv, results_to_coola_csv, parse_paltac_csv, parse_infomart_csv, parse_smacla_csv, ensure_output_dir, OUTPUT_DIR
+from process_fax import generate_pdfs, results_to_excel, results_to_csv, results_to_ne_csv, results_to_coola_csv, parse_paltac_csv, parse_infomart_csv, parse_smacla_csv, parse_goooods_csv, ensure_output_dir, OUTPUT_DIR
 from pdf_generator import gen_sylvia_pdf, gen_haruna_pdf
 
 app = Flask(__name__)
@@ -822,10 +822,16 @@ def api_upload_multi_csv():
         csv_bytes = f.read()
 
         # フォーマット判定
+        # 判定用に Shift-JIS と UTF-8 の両方で1行目を確認する（goooods は UTF-8-BOM）
         try:
-            first_line = csv_bytes.decode('shift-jis', errors='replace').split('\n')[0]
+            first_line_sjis = csv_bytes.decode('shift-jis', errors='replace').split('\n')[0]
         except Exception:
-            first_line = ""
+            first_line_sjis = ""
+        try:
+            first_line_utf8 = csv_bytes.decode('utf-8-sig', errors='replace').split('\n')[0]
+        except Exception:
+            first_line_utf8 = ""
+        first_line = first_line_sjis
 
         if (first_line.startswith('"H"') or first_line.startswith('H,')
                 or 'データ区分' in first_line):
@@ -834,6 +840,9 @@ def api_upload_multi_csv():
         elif '送信者ID' in first_line and 'メッセージ識別ID' in first_line:
             source = "smacla"
             results = parse_smacla_csv(csv_bytes, f.filename)
+        elif '注文ID' in first_line_utf8 and 'バリエーション名' in first_line_utf8:
+            source = "goooods"
+            results = parse_goooods_csv(csv_bytes, f.filename)
         else:
             source = "paltac"
             results = parse_paltac_csv(csv_bytes, f.filename)
@@ -857,6 +866,8 @@ def api_upload_multi_csv():
         main_source = "infomart"
     elif sources_used == {"smacla"}:
         main_source = "smacla"
+    elif sources_used == {"goooods"}:
+        main_source = "goooods"
     else:
         main_source = "paltac"
     combined_name = f"combined_{len(filenames)}files.csv"
@@ -897,6 +908,10 @@ def api_upload():
             first_line = csv_bytes.decode('shift-jis', errors='replace').split('\n')[0]
         except Exception:
             first_line = ""
+        try:
+            first_line_utf8 = csv_bytes.decode('utf-8-sig', errors='replace').split('\n')[0]
+        except Exception:
+            first_line_utf8 = ""
 
         # インフォマートは "H" 行あり/なし両方の形式を持つので、1行目に「データ区分」が
         # 含まれるかでも判定する（H行なしフォーマットの取引先用）
@@ -909,6 +924,10 @@ def api_upload():
             source = "smacla"
             results = parse_smacla_csv(csv_bytes, f.filename)
             error_msg = "スマクラCSVにデータが見つかりません"
+        elif '注文ID' in first_line_utf8 and 'バリエーション名' in first_line_utf8:
+            source = "goooods"
+            results = parse_goooods_csv(csv_bytes, f.filename)
+            error_msg = "goooods CSVに受注データが見つかりません"
         else:
             source = "paltac"
             results = parse_paltac_csv(csv_bytes, f.filename)
@@ -983,7 +1002,7 @@ def api_ocr():
         return jsonify({"error": "セッションが見つかりません"}), 404
 
     # CSV（PALTAC/インフォマート）/ 手入力: 既にパース済みの結果を返す
-    if sess.get("source") in ("paltac", "infomart", "manual", "smacla") and sess.get("results"):
+    if sess.get("source") in ("paltac", "infomart", "manual", "smacla", "goooods") and sess.get("results"):
         return jsonify({"pages": sess["results"]})
 
     # Phase 4: ドラフト編集モード（/api/load_draft 経由）も事前展開済み
@@ -1670,6 +1689,8 @@ PENDING_ORDERS_TEMPLATE = r"""<!DOCTYPE html>
   .badge-efax { background: #E3F2FD; color: #1565C0; }
   .badge-paltac { background: #FFF3E0; color: #E65100; }
   .badge-infomart { background: #F3E5F5; color: #6A1B9A; }
+  .badge-smacla { background: #E0F7FA; color: #00695C; }
+  .badge-goooods { background: #FCE4EC; color: #AD1457; }
   .badge-draft { background: #E8F5E9; color: #2E7D32; }
   .badge-error { background: #FFEBEE; color: #C62828; }
   .flag { display: inline-block; padding: 1px 6px; background: #FFE0B2; color: #BF360C; border-radius: 3px; font-size: 11px; margin-right: 4px; }
@@ -2201,6 +2222,8 @@ CONFIRMED_ORDERS_TEMPLATE = r"""<!DOCTYPE html>
   .badge-efax { background: #E3F2FD; color: #1565C0; }
   .badge-paltac { background: #FFF3E0; color: #E65100; }
   .badge-infomart { background: #F3E5F5; color: #6A1B9A; }
+  .badge-smacla { background: #E0F7FA; color: #00695C; }
+  .badge-goooods { background: #FCE4EC; color: #AD1457; }
   .badge-confirmed { background: #C8E6C9; color: #1B5E20; }
   .badge-count { background: #FFE0B2; color: #BF360C; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 700; }
   .empty { text-align: center; padding: 40px; color: #888; }
@@ -3612,7 +3635,7 @@ function renderPage(idx) {
         }
         draftIframe.src = `/api/pending_pdf/${draftMode.draft_id}`;
         draftIframe.style.display = '';
-    } else if (pr.source === 'paltac' || pr.source === 'infomart' || pr.source === 'manual' || pr.source === 'smacla') {
+    } else if (pr.source === 'paltac' || pr.source === 'infomart' || pr.source === 'manual' || pr.source === 'smacla' || pr.source === 'goooods') {
         // 手入力 / CSV 系: プレースホルダー
         previewImg.src = '';
         if (!placeholder) {

@@ -385,6 +385,160 @@ def parse_smacla_csv(csv_bytes, filename="smacla.csv"):
     return results
 
 
+def parse_goooods_csv(csv_bytes, filename="goooods.csv"):
+    """goooods（グッズ）受注CSVを読み込み、results形式に変換する。
+
+    フォーマット特徴:
+    - UTF-8-BOM
+    - ヘッダー: 注文ID, 注文日, 注文ステータス, 取引先会社名, ブランド名,
+                商品名, バリエーション名, 貴社品番, バーコード(JAN), 発注数（卸売単位）,
+                発注数（小売単位）, 納品先郵便番号, 納品先住所, 納品先担当者名, 納品先電話番号 …
+    - 1注文ID = 複数商品行（バリエーション毎に1行）
+    - 数量は「発注数（卸売単位）」= ケース数、「発注数（小売単位）」= バラ数
+
+    マッピング:
+    - 注文ID       → slip_number
+    - 注文日       → order_date
+    - 取引先会社名 → sender
+    - 納品先担当者名 → delivery_dest（納品先名として扱う）
+    - 貴社品番     → product_code
+    - バーコード   → jan_code
+    - 発注数（卸売単位）→ quantity_cs
+    """
+    import unicodedata
+    import io
+    from collections import OrderedDict
+    from ocr_module import match_product, match_ddc, load_product_master, load_ddc_master
+
+    pm = load_product_master()
+    ddc_master = load_ddc_master()
+
+    # goooods は UTF-8 BOM 付きだが、他エンコード念のため試行
+    text = None
+    for enc in ['utf-8-sig', 'utf-8', 'shift_jis', 'cp932']:
+        try:
+            text = csv_bytes.decode(enc)
+            break
+        except (UnicodeDecodeError, AttributeError):
+            continue
+    if text is None:
+        return []
+
+    reader = csv.DictReader(io.StringIO(text))
+    rows = list(reader)
+    if not rows:
+        return []
+
+    # 注文IDでグループ化（1注文=1受注ページ）
+    order_groups = OrderedDict()
+    for r in rows:
+        order_id = (r.get('注文ID') or '').strip()
+        if not order_id:
+            continue
+        order_groups.setdefault(order_id, []).append(r)
+
+    results = []
+    page = 0
+    for order_id, group_rows in order_groups.items():
+        page += 1
+        first = group_rows[0]
+
+        sender = unicodedata.normalize('NFKC', (first.get('取引先会社名') or '').strip())
+        # 納品先担当者名を「納品先名」として扱う（施設名等が入る）
+        dest_name = unicodedata.normalize('NFKC', (first.get('納品先担当者名') or '').strip())
+        # 担当者名が空欄なら取引先会社名で代替
+        if not dest_name:
+            dest_name = sender
+        dest_postal = (first.get('納品先郵便番号') or '').strip().replace('-', '')
+        dest_address = unicodedata.normalize('NFKC', (first.get('納品先住所') or '').strip())
+        dest_tel = (first.get('納品先電話番号') or '').strip()
+
+        # 注文日を YYYY/MM/DD → YYYY-MM-DD 形式に統一
+        order_date = (first.get('注文日') or '').strip().replace('/', '-')
+        # goooods CSV には納品日フィールドが無いので空欄（UIで手入力）
+        delivery_date = ''
+
+        # DDCマッチング（納品先名で試行、なければ CSV の住所・電話等で補完）
+        ddc_match = match_ddc(dest_name, ddc_master, sender=sender)
+        if not ddc_match.get('matched'):
+            # 未マッチでも CSV 由来の情報を ddc_match に載せておくと
+            # 後段の NE/COOLA CSV 生成で住所・郵便が拾える
+            ddc_match['name'] = dest_name
+            ddc_match['address'] = dest_address
+            ddc_match['postal'] = dest_postal
+            ddc_match['tel'] = dest_tel
+        else:
+            # マスタに住所が無いケースは CSV 側で補完
+            if not ddc_match.get('address') and dest_address:
+                ddc_match['address'] = dest_address
+            if not ddc_match.get('postal') and dest_postal:
+                ddc_match['postal'] = dest_postal
+            if not ddc_match.get('tel') and dest_tel:
+                ddc_match['tel'] = dest_tel
+
+        # 商品行
+        matched_items = []
+        for r in group_rows:
+            jan = (r.get('バーコード') or '').strip()
+            product_code = (r.get('貴社品番') or '').strip()
+            product_name = unicodedata.normalize(
+                'NFKC', (r.get('バリエーション名') or r.get('商品名') or '').strip())
+            try:
+                cs_qty = int(float((r.get('発注数（卸売単位）') or '0').strip() or '0'))
+            except (ValueError, TypeError):
+                cs_qty = 0
+            try:
+                unit_price = float((r.get('卸売価格（税抜）') or '0').strip() or '0')
+            except (ValueError, TypeError):
+                unit_price = 0.0
+
+            ocr_item = {
+                'jan_code': jan,
+                'product_code': product_code,
+                'product_name': product_name,
+                'quantity_cs': cs_qty,
+            }
+            match = match_product(ocr_item, pm)
+            if match:
+                if unit_price:
+                    match['unit_price'] = unit_price
+                matched_items.append(match)
+            else:
+                matched_items.append({
+                    'matched': False,
+                    'ocr_name': product_name,
+                    'jan': jan,
+                    'code': product_code,
+                    'quantity': cs_qty,
+                    'unit_price': unit_price,
+                })
+
+        sylvia_items = [i for i in matched_items if i.get('matched') and i.get('output_dest') == 'シルビア']
+        haruna_items = [i for i in matched_items if i.get('matched') and i.get('output_dest') == 'ハルナ']
+
+        results.append({
+            'page': page,
+            'source': 'goooods',
+            'source_file': filename,
+            'ocr_raw': {
+                # 注文IDは UUID で長いので先頭8桁を表示用に切り出す（内部では full 保持）
+                'order_no': order_id,
+                'order_date': order_date,
+                'delivery_date': delivery_date,
+                'delivery_dest': dest_name,
+                'sender': sender,
+                'notes': f'goooods受注 / 注文ID:{order_id[:8]}',
+                'items': [],
+            },
+            'matched_items': matched_items,
+            'ddc_match': ddc_match,
+            'sylvia_items': sylvia_items,
+            'haruna_items': haruna_items,
+        })
+
+    return results
+
+
 def parse_paltac_csv(csv_bytes, filename="paltac.csv"):
     """PALTAC WebEDI CSVを読み込み、OCR結果と同じresults形式に変換する。
 
