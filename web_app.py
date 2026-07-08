@@ -1341,11 +1341,19 @@ def api_confirm():
                                                     shipping_fee_total, shipping_fee_two_burden)
 
             # ページ毎の送料を per_page_results から取得（取れなければ 1ページ目に全合計）
+            # shipping_fee_breakdown["pages"][i] は calculate_shipping_fee の戻り値そのもので
+            # 送料合計は "total_fee" キー（"page_total_fee" というキーは存在しない）。
+            # 過去にこのキー名を取り違えたため、経路B(manual/paltac/smacla/goooods) 確定時に
+            # 送料が常に 0 で保存されるバグが発生していた（2026-07-08 修正）。
             per_page_fees = {}
             if shipping_fee_breakdown:
                 for idx, pp in enumerate(shipping_fee_breakdown.get("pages") or []):
-                    key = pp.get("page_index") if "page_index" in pp else pp.get("page", idx)
-                    per_page_fees[key] = pp.get("page_total_fee") or 0
+                    if pp is None:
+                        continue
+                    if shipping_fee_two_burden:
+                        per_page_fees[idx] = 0
+                    else:
+                        per_page_fees[idx] = int(pp.get("total_fee") or 0)
 
             def _to_iso_date(s):
                 if not s:
