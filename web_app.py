@@ -27,11 +27,14 @@ for _stream_name in ('stdout', 'stderr'):
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from flask import Flask, request, jsonify, send_file, render_template_string, make_response
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 
-# アプリ本体ファイルの最終更新日時を取得（起動時に確定）
+# JST 定数（Render は UTC 稼働なので、UI 表示は明示的に JST 変換する）
+JST = timezone(timedelta(hours=9))
+
+# アプリ本体ファイルの最終更新日時を取得（起動時に確定・JST 表記）
 _APP_FILE = os.path.abspath(__file__)
-APP_LAST_UPDATED = datetime.fromtimestamp(os.path.getmtime(_APP_FILE)).strftime("%Y-%m-%d %H:%M")
+APP_LAST_UPDATED = datetime.fromtimestamp(os.path.getmtime(_APP_FILE), tz=JST).strftime("%Y-%m-%d %H:%M")
 from ocr_module import (
     process_fax_pdf, pdf_to_images, load_ddc_master, load_product_master,
     match_ddc, match_product, load_staff, ocr_fax_page, normalize, normalize_company,
@@ -1786,6 +1789,30 @@ PENDING_ORDERS_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <script>
+// ISO 文字列 (UTC) を JST 表示に変換するヘルパー。
+// Render サーバは UTC 稼働のため、ブラウザ側で JST 固定変換する。
+function formatJst(iso, includeSec) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const jst = new Date(d.getTime() + 9 * 3600 * 1000);
+  const y = jst.getUTCFullYear();
+  const m = String(jst.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(jst.getUTCDate()).padStart(2, '0');
+  const hh = String(jst.getUTCHours()).padStart(2, '0');
+  const mi = String(jst.getUTCMinutes()).padStart(2, '0');
+  const ss = String(jst.getUTCSeconds()).padStart(2, '0');
+  return includeSec ? `${y}-${m}-${dd} ${hh}:${mi}:${ss}` : `${y}-${m}-${dd} ${hh}:${mi}`;
+}
+// JST 基準の「今日」YYYY-MM-DD 文字列
+function todayJst() {
+  const now = new Date();
+  const jst = new Date(now.getTime() + 9 * 3600 * 1000);
+  const y = jst.getUTCFullYear();
+  const m = String(jst.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(jst.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
 let currentSource = '';
 let currentOrders = [];   // 取得した全件
 let filteredOrders = [];  // 検索フィルタ適用後（描画用）
@@ -2022,7 +2049,7 @@ function renderDetail(data) {
       <div class="kv">
         ${kv('元ファイル', h.source_file_name)}
         ${kv('元メール送信元', h.source_email_from)}
-        ${kv('元メール受信日時', h.source_email_received_at ? h.source_email_received_at.replace('T', ' ').substring(0, 16) : '')}
+        ${kv('元メール受信日時', formatJst(h.source_email_received_at))}
         ${kv('OCRページ', h.ocr_page_no)}
       </div>
     </div>
@@ -2041,8 +2068,8 @@ function renderDetail(data) {
 
     <div style="font-size:11px;color:#999;margin-top:20px">
       ID: ${h.id}<br>
-      作成: ${(h.created_at || '').replace('T', ' ').substring(0, 19)}<br>
-      更新: ${(h.updated_at || '').replace('T', ' ').substring(0, 19)}
+      作成: ${formatJst(h.created_at, true)}<br>
+      更新: ${formatJst(h.updated_at, true)}
     </div>`;
 
   document.getElementById('detailBody').innerHTML = html;
@@ -2339,6 +2366,30 @@ CONFIRMED_ORDERS_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <script>
+// ISO 文字列 (UTC) を JST 表示に変換するヘルパー。
+// Render サーバは UTC 稼働のため、ブラウザ側で JST 固定変換する。
+function formatJst(iso, includeSec) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const jst = new Date(d.getTime() + 9 * 3600 * 1000);
+  const y = jst.getUTCFullYear();
+  const m = String(jst.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(jst.getUTCDate()).padStart(2, '0');
+  const hh = String(jst.getUTCHours()).padStart(2, '0');
+  const mi = String(jst.getUTCMinutes()).padStart(2, '0');
+  const ss = String(jst.getUTCSeconds()).padStart(2, '0');
+  return includeSec ? `${y}-${m}-${dd} ${hh}:${mi}:${ss}` : `${y}-${m}-${dd} ${hh}:${mi}`;
+}
+// JST 基準の「今日」YYYY-MM-DD 文字列
+function todayJst() {
+  const now = new Date();
+  const jst = new Date(now.getTime() + 9 * 3600 * 1000);
+  const y = jst.getUTCFullYear();
+  const m = String(jst.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(jst.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
 let currentSource = '';
 let currentOrders = [];   // 取得した全件
 let filteredOrders = [];  // 検索フィルタ適用後（描画用）
@@ -2437,7 +2488,7 @@ function renderTable() {
     const ship = o.shipping_fee_two_burden
       ? '<span style="color:#888">TWO負担</span>'
       : (o.shipping_fee != null ? `¥${Number(o.shipping_fee).toLocaleString()}` : '-');
-    const confirmedAt = (o.confirmed_at || '').replace('T', ' ').substring(0, 16);
+    const confirmedAt = formatJst(o.confirmed_at);
     const checked = selectedOrderIds.has(o.id) ? 'checked' : '';
     return `<tr data-id="${o.id}">
       <td onclick="event.stopPropagation()" style="text-align:center; padding:0 4px;">
@@ -2545,7 +2596,7 @@ function renderDetail(data) {
       <h3>確定情報</h3>
       <div class="kv">
         ${kv('ステータス', h.status)}
-        ${kv('確定日時', (h.confirmed_at || '').replace('T', ' ').substring(0, 19))}
+        ${kv('確定日時', formatJst(h.confirmed_at, true))}
         ${kv('確定者', h.confirmed_by)}
         ${kv('確定回数', h.confirmation_count || 1)}
         ${kv('送料(税抜)', h.shipping_fee_two_burden ? 'TWO負担' :
@@ -2591,7 +2642,7 @@ function renderDetail(data) {
   if (confirmHistory.length > 0) {
     html += `<div class="detail-section"><h3>確定履歴 (${confirmHistory.length}回)</h3>`;
     confirmHistory.slice().reverse().forEach((entry, idx) => {
-      const at = (entry.at || '').replace('T', ' ').substring(0, 19);
+      const at = formatJst(entry.at, true);
       const by = entry.by || '-';
       const isLatest = idx === 0;
       const label = isLatest ? '最新' : `${confirmHistory.length - idx}回目`;
@@ -2605,8 +2656,8 @@ function renderDetail(data) {
   html += `
     <div style="font-size:11px;color:#999;margin-top:20px">
       ID: ${h.id}<br>
-      作成: ${(h.created_at || '').replace('T', ' ').substring(0, 19)}<br>
-      更新: ${(h.updated_at || '').replace('T', ' ').substring(0, 19)}
+      作成: ${formatJst(h.created_at, true)}<br>
+      更新: ${formatJst(h.updated_at, true)}
     </div>`;
 
   document.getElementById('detailBody').innerHTML = html;
@@ -2644,7 +2695,7 @@ function selectAllVisible(check) {
 }
 
 function selectToday() {
-  const today = new Date().toISOString().substring(0, 10);  // YYYY-MM-DD
+  const today = todayJst();  // JST 基準の YYYY-MM-DD
   // 確定日時 (confirmed_at) が今日のレコードを選択
   selectedOrderIds.clear();
   filteredOrders.forEach(o => {
@@ -2944,6 +2995,20 @@ body { font-family: 'Segoe UI', 'Yu Gothic UI', 'Meiryo', sans-serif; background
 </div>
 
 <script>
+// ISO 文字列 (UTC) を JST 表示に変換するヘルパー
+function formatJst(iso, includeSec) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const jst = new Date(d.getTime() + 9 * 3600 * 1000);
+  const y = jst.getUTCFullYear();
+  const m = String(jst.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(jst.getUTCDate()).padStart(2, '0');
+  const hh = String(jst.getUTCHours()).padStart(2, '0');
+  const mi = String(jst.getUTCMinutes()).padStart(2, '0');
+  const ss = String(jst.getUTCSeconds()).padStart(2, '0');
+  return includeSec ? `${y}-${m}-${dd} ${hh}:${mi}:${ss}` : `${y}-${m}-${dd} ${hh}:${mi}`;
+}
 // ─── State ───
 let sessionId = null;
 let pageResults = [];
@@ -3318,7 +3383,7 @@ function renderDraftBanner() {
         ? `<span style="background:#D32F2F;color:white;padding:2px 8px;border-radius:10px;font-size:11px;">ERROR</span>`
         : `<span style="background:#FFA726;color:white;padding:2px 8px;border-radius:10px;font-size:11px;">DRAFT</span>`;
     const countText = draftMode.draft_confirmation_count > 0
-        ? `<span style="margin-left:auto;font-size:12px;color:#BF360C">確定回数: ${draftMode.draft_confirmation_count}回 / 最終確定: ${(draftMode.draft_confirmed_at || '').replace('T',' ').substring(0,16)}</span>`
+        ? `<span style="margin-left:auto;font-size:12px;color:#BF360C">確定回数: ${draftMode.draft_confirmation_count}回 / 最終確定: ${formatJst(draftMode.draft_confirmed_at)}</span>`
         : '';
     banner.innerHTML = `
         <span style="font-size:18px">📝</span>
@@ -4100,7 +4165,7 @@ async function doConfirm() {
 
     // Phase 4: 再確定（confirmation_count > 0）の場合は警告ダイアログ
     if (draftMode && (draftMode.draft_confirmation_count || 0) > 0) {
-        const lastAt = (draftMode.draft_confirmed_at || '').replace('T', ' ').substring(0, 16);
+        const lastAt = formatJst(draftMode.draft_confirmed_at);
         const ok = confirm(
             `⚠️ このオーダーは既に確定済みです（${draftMode.draft_confirmation_count}回目 / ${lastAt}）。\n\n` +
             '再確定すると新しい発注書PDF・NE/COOLA CSV が生成されます（旧版は履歴フォルダへ自動退避）。\n\n' +
