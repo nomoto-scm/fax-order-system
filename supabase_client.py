@@ -93,6 +93,25 @@ def _supabase_patch(table: str, query_params: str, data: dict) -> list[dict] | N
         return None
 
 
+def _supabase_delete(table: str, query_params: str) -> bool:
+    """Supabase REST API DELETEリクエスト。成功時 True。"""
+    url = f"{SUPABASE_URL}/rest/v1/{table}?{query_params}"
+    req = urllib.request.Request(url, headers={
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }, method="DELETE")
+    try:
+        with urllib.request.urlopen(req, timeout=15):
+            return True
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else str(e)
+        print(f"  [Supabase] {table} DELETE失敗 HTTP{e.code}: {err_body[:200]}")
+        return False
+    except (urllib.error.URLError, TimeoutError) as e:
+        print(f"  [Supabase] {table} DELETE失敗: {e}")
+        return False
+
+
 def confirm_fax_order(
     order_id: str,
     *,

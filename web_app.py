@@ -1430,7 +1430,36 @@ def api_confirm():
                         "ocr_raw_name": it.get("ocr_name") or None,
                     })
 
-                new_id = insert_fax_order(header, items_payload)
+                # 経路B の再確定対策 (2026-07-13):
+                # 同じ slip_number で既に確定済みレコードがある場合は新規INSERTせず、
+                # そのレコードを update する（経路Aと同じく snapshot 追加＆confirmation_count++）。
+                # これで手動入力モードで「編集→再確定」を繰り返しても重複しない。
+                from supabase_client import _supabase_get, _supabase_patch, _supabase_post, _supabase_delete
+                slip = header.get("slip_number")
+                existing_id = None
+                if slip:
+                    ex_rows = _supabase_get(
+                        "fax_orders_scm",
+                        f"select=id&slip_number=eq.{slip}"
+                        "&status=eq.confirmed"
+                        "&source_channel=in.(manual,paltac,smacla,goooods,infomart)"
+                        "&order=confirmed_at.desc.nullslast&limit=1"
+                    )
+                    if ex_rows:
+                        existing_id = ex_rows[0]["id"]
+
+                if existing_id:
+                    # 既存レコード update: header の主要項目を PATCH、items を全入替
+                    header_update = {k: v for k, v in header.items() if k != "status"}
+                    _supabase_patch("fax_orders_scm", f"id=eq.{existing_id}", header_update)
+                    _supabase_delete("fax_order_items_scm", f"order_id=eq.{existing_id}")
+                    if items_payload:
+                        items_with_fk = [{**it, "order_id": existing_id} for it in items_payload]
+                        _supabase_post("fax_order_items_scm", items_with_fk)
+                    new_id = existing_id
+                else:
+                    new_id = insert_fax_order(header, items_payload)
+
                 if new_id:
                     page_fee = per_page_fees.get(page_idx,
                                                  shipping_fee_total if page_idx == 0 else 0)
