@@ -40,7 +40,7 @@ from ocr_module import (
     match_ddc, match_product, load_staff, ocr_fax_page, normalize, normalize_company,
     _ddc_row_to_dict,
 )
-from process_fax import generate_pdfs, results_to_excel, results_to_csv, results_to_ne_csv, results_to_coola_csv, parse_paltac_csv, parse_infomart_csv, parse_smacla_csv, parse_goooods_csv, ensure_output_dir, OUTPUT_DIR
+from process_fax import generate_pdfs, results_to_excel, results_to_csv, results_to_ne_csv, results_to_coola_csv, results_to_logiless_csv, parse_paltac_csv, parse_infomart_csv, parse_smacla_csv, parse_goooods_csv, ensure_output_dir, OUTPUT_DIR
 from pdf_generator import gen_sylvia_pdf, gen_haruna_pdf
 
 app = Flask(__name__)
@@ -292,9 +292,9 @@ def api_ddc_list():
 
 @app.route("/api/bulk_csv_export", methods=["POST"])
 def api_bulk_csv_export():
-    """Phase 4 改修: 複数の確定済 fax_orders_scm レコードから NE/COOLA CSV を一括生成。
+    """Phase 4 改修: 複数の確定済 fax_orders_scm レコードから NE/COOLA/LOGILESS CSV を一括生成。
 
-    Body: {"order_ids": [uuid, ...], "csv_type": "ne" | "coola"}
+    Body: {"order_ids": [uuid, ...], "csv_type": "ne" | "coola" | "logiless"}
     Returns: {"success": True, "filename": "...", "url": "/api/download/...", "skipped": N}
 
     旧運用（複数受注を1つのCSVに）に近い、まとめアップロードフロー用。
@@ -304,8 +304,8 @@ def api_bulk_csv_export():
     csv_type = (data.get("csv_type") or "").lower()
     if not order_ids:
         return jsonify({"error": "order_ids が空です"}), 400
-    if csv_type not in ("ne", "coola"):
-        return jsonify({"error": "csv_type は 'ne' または 'coola'"}), 400
+    if csv_type not in ("ne", "coola", "logiless"):
+        return jsonify({"error": "csv_type は 'ne' / 'coola' / 'logiless'"}), 400
 
     from supabase_client import fetch_order_with_items
     pm_df = get_product_master()
@@ -493,12 +493,15 @@ def api_bulk_csv_export():
         if csv_type == "ne":
             outfile_name = f"NE一括_{timestamp}_{len(all_results)}件.csv"
             outfile = results_to_ne_csv(all_results, outfile_name)
+        elif csv_type == "logiless":
+            outfile_name = f"LOGILESS一括_{timestamp}_{len(all_results)}件.csv"
+            outfile = results_to_logiless_csv(all_results, outfile_name)
         else:  # coola
             outfile_name = f"COOLA一括_{timestamp}_{len(all_results)}件.csv"
             outfile = results_to_coola_csv(all_results, outfile_name)
 
         if not outfile:
-            return jsonify({"error": "CSV生成失敗（対象データなし or 直送のみで COOLA出力対象が0件）",
+            return jsonify({"error": "CSV生成失敗（対象データなし or 直送のみで COOLA/LOGILESS 出力対象が0件）",
                             "skipped": skipped, "processed": len(all_results)}), 400
 
         filename = os.path.basename(outfile)
@@ -1288,6 +1291,8 @@ def api_confirm():
         ne_csv_path = results_to_ne_csv(results, pdf_name) if results else None
         # COOLA CSV: 自社倉庫出荷システム用。直送商品（10cs以上）は results_to_coola_csv 内でフィルタ済
         coola_csv_path = results_to_coola_csv(results, pdf_name) if results else None
+        # LOGILESS CSV: ロジレス出荷システム用。COOLA と同じ対象範囲だが P/BN/BO/BX 列の使い方が異なる
+        logiless_csv_path = results_to_logiless_csv(results, pdf_name) if results else None
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1490,6 +1495,8 @@ def api_confirm():
         output_files.append({"name": os.path.basename(ne_csv_path), "type": "ne_csv", "label": "NE受注CSV"})
     if coola_csv_path:
         output_files.append({"name": os.path.basename(coola_csv_path), "type": "coola_csv", "label": "クーラCSV"})
+    if logiless_csv_path:
+        output_files.append({"name": os.path.basename(logiless_csv_path), "type": "logiless_csv", "label": "ロジレスCSV"})
     if csv_path:
         output_files.append({"name": os.path.basename(csv_path), "type": "csv"})
     if xlsx_path:
@@ -2351,6 +2358,10 @@ CONFIRMED_ORDERS_TEMPLATE = r"""<!DOCTYPE html>
             style="padding:6px 14px; border:none; background:#E65100; color:white; border-radius:4px; cursor:pointer; font-size:13px; font-weight:600;" disabled>
       🏭 COOLA CSVをまとめてダウンロード
     </button>
+    <button onclick="bulkExport('logiless')" id="btnBulkLogiless"
+            style="padding:6px 14px; border:none; background:#6A1B9A; color:white; border-radius:4px; cursor:pointer; font-size:13px; font-weight:600;" disabled>
+      🚚 ロジレスCSVをまとめてダウンロード
+    </button>
   </div>
 
   <!-- 検索バー -->
@@ -2746,9 +2757,11 @@ function updateSelectionUI() {
   const enabled = n > 0;
   document.getElementById('btnBulkNe').disabled = !enabled;
   document.getElementById('btnBulkCoola').disabled = !enabled;
+  document.getElementById('btnBulkLogiless').disabled = !enabled;
   // ボタンスタイル更新
   document.getElementById('btnBulkNe').style.opacity = enabled ? '1' : '0.5';
   document.getElementById('btnBulkCoola').style.opacity = enabled ? '1' : '0.5';
+  document.getElementById('btnBulkLogiless').style.opacity = enabled ? '1' : '0.5';
 }
 
 async function bulkExport(csvType) {
@@ -2757,7 +2770,9 @@ async function bulkExport(csvType) {
     alert('受注を1件以上選択してください');
     return;
   }
-  const btnId = csvType === 'ne' ? 'btnBulkNe' : 'btnBulkCoola';
+  const btnId = csvType === 'ne' ? 'btnBulkNe'
+              : csvType === 'logiless' ? 'btnBulkLogiless'
+              : 'btnBulkCoola';
   const btn = document.getElementById(btnId);
   const originalLabel = btn.innerHTML;
   btn.disabled = true;

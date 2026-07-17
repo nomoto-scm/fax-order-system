@@ -1330,6 +1330,217 @@ def results_to_coola_csv(results, pdf_name):
     return csv_path
 
 
+def results_to_logiless_csv(results, pdf_name):
+    """OCR結果をロジレス（LOGILESS）用CSV形式に変換して出力する。
+
+    COOLA CSV との差分（2026-07-14 追加）:
+      - P列（出荷備考）:  発注番号+商品情報 → 伝票番号 (slip_no) のみ
+      - BN列（行備考）:  空 → 各明細行の賞味期限 (YYYY/MM/DD)
+      - BO列（出荷行備考）: 空 → 各明細行の "二重梱包" or 空
+      - BX列（納品書コメント）: 空 → "発注番号{slip_no}"
+    他ロジック（伝票分割・配送方法判定・COOLA除外条件など）は COOLA と同一。
+    """
+    ensure_output_dir()
+    csv_name = os.path.splitext(pdf_name)[0] + "_LOGILESS.csv"
+    csv_path = os.path.join(OUTPUT_DIR, csv_name)
+
+    import unicodedata
+    oroshisaki = _load_oroshisaki_master()
+
+    def _fmt_expiry(v):
+        """賞味期限を YYYY/MM/DD 形式に整形（None/空は空文字）"""
+        if not v:
+            return ""
+        s = str(v).strip()
+        if not s:
+            return ""
+        # 既に YYYY/MM/DD 形式ならそのまま、YYYY-MM-DD なら / に変換
+        return s.replace("-", "/")
+
+    rows = []
+    for page_result in results:
+        if "error" in page_result:
+            continue
+        ocr = page_result["ocr_raw"]
+        ddc = page_result.get("ddc_match", {})
+
+        order_no = ocr.get("order_no", "")
+        two_order_no = page_result.get("two_order_no", "")
+        delivery_date = ocr.get("delivery_date", "")
+
+        # 納品先情報
+        dest_name = ddc.get("name", ocr.get("delivery_dest", ""))
+        dest_postal = (ddc.get("postal", "") or "").replace("-", "")
+        dest_address = ddc.get("address", "") or ""
+        dest_tel = _sanitize_tel(ddc.get("tel", ""))
+
+        # 卸先マスタから情報取得
+        oroshi = oroshisaki.get(dest_name) or oroshisaki.get(unicodedata.normalize('NFKC', dest_name)) or {}
+        shop_code = "4"
+        shop_name = "卸"
+        payment = oroshi.get("支払方法", "その他")
+
+        # 住所分割
+        pref, addr1, addr2, addr3 = _split_address(dest_address)
+
+        # BC列（コメント）
+        is_amazon = dest_name.startswith("Amazon.co.jp")
+        is_own_warehouse = bool(page_result.get("warehouse_direct"))
+        logiless_comment = "" if (is_amazon or is_own_warehouse) else "21845"
+
+        # マッチ済み商品をグループに分類（COOLA と同じ直送除外ロジック）
+        all_matched = [it for it in page_result.get("matched_items", []) if it.get("matched")]
+        from collections import defaultdict as _dd
+        _cs_by_dest = _dd(int)
+        for _it in all_matched:
+            try:
+                _cs_by_dest[_it.get("output_dest") or ""] += int(float(_it.get("quantity") or 0))
+            except (TypeError, ValueError):
+                pass
+        def _is_direct_shipping(it):
+            route = (it.get("shipping_route") or "").strip()
+            if route == "warehouse":
+                return False
+            if route == "direct":
+                return True
+            od = it.get("output_dest") or ""
+            if od in ("シルビア", "ハルナ"):
+                return _cs_by_dest[od] >= 10
+            if od in ("野村不動産", "エムズインク", "POW BAR"):
+                return True
+            return False
+        matched_items = [it for it in all_matched if not _is_direct_shipping(it)]
+        if not matched_items:
+            continue
+
+        groups = {}
+        for item in matched_items:
+            product_name = item.get("master_name", item.get("ocr_name", ""))
+            gkey, _ = _classify_product_group(product_name)
+            groups.setdefault(gkey, []).append(item)
+
+        suffix_map = {"S": "-S", "E": "-E", "W": "-W", "G": "-G", "X": "-X"}
+        for gkey, group_items in groups.items():
+            suffix = suffix_map.get(gkey, "")
+            slip_no = f"{order_no}{suffix}" if len(groups) > 1 else order_no
+
+            group_total = 0
+            for item in group_items:
+                irisuu = _get_irisuu(item)
+                cs_p = item.get("cs_price", 0)
+                qty = item.get("quantity", 0)
+                try:
+                    unit_p = int(float(cs_p or 0)) // irisuu if irisuu > 0 else int(float(cs_p or 0))
+                    q = int(float(qty or 0)) * irisuu
+                    group_total += unit_p * q
+                except (ValueError, TypeError):
+                    pass
+            group_tax = int(group_total * 0.1)
+
+            # グループ内の全CS数合計（配送方法判定用）
+            total_cs_in_group = 0
+            for item in group_items:
+                try:
+                    total_cs_in_group += int(float(item.get("quantity", 0) or 0))
+                except (ValueError, TypeError):
+                    pass
+
+            line_no = 0
+            for item in group_items:
+                line_no += 1
+
+                qty_cs = item.get("quantity", 0)
+                cs_price = item.get("cs_price", 0)
+                try:
+                    price = int(float(cs_price or 0))
+                except (ValueError, TypeError):
+                    price = 0
+                try:
+                    qty_cs_int = int(float(qty_cs or 0))
+                except (ValueError, TypeError):
+                    qty_cs_int = 0
+
+                irisuu = _get_irisuu(item)
+                quantity_bara = qty_cs_int * irisuu
+                unit_price_bara = int(price / irisuu) if irisuu > 0 else price
+
+                product_name = item.get("master_name", item.get("ocr_name", ""))
+                product_code = item.get("code", "")
+
+                if gkey == "S":
+                    shipping_method, carrier_id, time_code = _select_shipping_method(product_name, total_cs_in_group, pref)
+                else:
+                    shipping_method, carrier_id, time_code = _select_shipping_method(product_name, qty_cs_int, pref)
+
+                # ロジレス版の各明細行固有の値
+                expiry_str = _fmt_expiry(item.get("expiry_date"))
+                double_pack_str = "二重梱包" if item.get("double_pack") else ""
+
+                row = {h: "" for h in COOLA_HEADERS}
+                row.update({
+                    "ショップコード": shop_code,
+                    "ショップ名": shop_name,
+                    "表示受注番号": slip_no,
+                    "行no": line_no,
+                    "配送先名": dest_name,
+                    "配送先郵便番号": dest_postal,
+                    "配送先都道府県": pref,
+                    "配送先住所１": addr1,
+                    "配送先住所２": addr2,
+                    "配送先住所３": addr3,
+                    "配送先電話番号": dest_tel,
+                    # P列: 伝票番号のみ（COOLA は複合内容だった）
+                    "出荷備考": slip_no,
+                    "出荷日": "",
+                    "配送会社id": carrier_id,
+                    "配送指定日": f"{delivery_date} 00:00:00" if delivery_date else "",
+                    "配送時間帯": time_code,
+                    "顧客id": two_order_no,
+                    "税種区分": "1",
+                    "送料": int(page_result.get("shipping_fee") or 0),
+                    "代引手数料": 0,
+                    "消費税": group_tax,
+                    "ポイント使用額": 0,
+                    "請求額合計": group_total + group_tax,
+                    "決済区分id": "",
+                    "決済方法": payment,
+                    "配送方法": shipping_method,
+                    "購入者氏名": dest_name,
+                    "購入者郵便番号": dest_postal,
+                    "購入者都道府県": pref,
+                    "購入者住所１": addr1,
+                    "購入者住所２": addr2,
+                    "購入者住所３": addr3,
+                    "購入者電話番号": dest_tel,
+                    "コメント": logiless_comment,
+                    "品名": product_name,
+                    "形式/型番": product_code,
+                    "受注数": quantity_bara,
+                    "単価": unit_price_bara,
+                    # BN列: 賞味期限 (行備考)
+                    "行備考": expiry_str,
+                    # BO列: 二重梱包 (出荷行備考)
+                    "出荷行備考": double_pack_str,
+                    "送状備考1": "",
+                    "ギフトフラグ": 0,
+                    # BX列: 発注番号XXXX (納品書コメント)
+                    "納品書コメント": f"発注番号{slip_no}" if slip_no else "",
+                    "消費税率": 10,
+                })
+                rows.append(row)
+
+    if not rows:
+        return None
+
+    _archive_existing_file(csv_path)
+    with open(csv_path, "w", newline="", encoding="cp932", errors="replace") as f:
+        writer = csv.DictWriter(f, fieldnames=COOLA_HEADERS, quoting=csv.QUOTE_ALL)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return csv_path
+
+
 def results_to_excel(results, pdf_name):
     """Write OCR+matching results to Excel (.xlsx) with DDC dropdown for uncertain rows.
 
