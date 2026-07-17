@@ -1388,28 +1388,10 @@ def results_to_logiless_csv(results, pdf_name):
         is_own_warehouse = bool(page_result.get("warehouse_direct"))
         logiless_comment = "" if (is_amazon or is_own_warehouse) else "21845"
 
-        # マッチ済み商品をグループに分類（COOLA と同じ直送除外ロジック）
-        all_matched = [it for it in page_result.get("matched_items", []) if it.get("matched")]
-        from collections import defaultdict as _dd
-        _cs_by_dest = _dd(int)
-        for _it in all_matched:
-            try:
-                _cs_by_dest[_it.get("output_dest") or ""] += int(float(_it.get("quantity") or 0))
-            except (TypeError, ValueError):
-                pass
-        def _is_direct_shipping(it):
-            route = (it.get("shipping_route") or "").strip()
-            if route == "warehouse":
-                return False
-            if route == "direct":
-                return True
-            od = it.get("output_dest") or ""
-            if od in ("シルビア", "ハルナ"):
-                return _cs_by_dest[od] >= 10
-            if od in ("野村不動産", "エムズインク", "POW BAR"):
-                return True
-            return False
-        matched_items = [it for it in all_matched if not _is_direct_shipping(it)]
+        # マッチ済み商品を全件対象にする（LOGILESS は NE と同じ条件で全件出力）
+        # 直送・パートナー直送も含める。COOLA が持つ「_is_direct_shipping で除外」処理は
+        # ここには入れない（2026-07-14 仕様変更）。
+        matched_items = [it for it in page_result.get("matched_items", []) if it.get("matched")]
         if not matched_items:
             continue
 
