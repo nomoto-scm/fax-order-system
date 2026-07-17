@@ -113,6 +113,8 @@ def get_ddc_list():
                 "postal": s(row.get("郵便番号", "")),
                 "torihikisaki": s(row.get("取引先名", "")),
                 "torihikisaki_code": s(row.get("取引先コード", "")),
+                # 二重梱包不可判定などで使用（例: PALTAC=1021 は 2Gummy を二重梱包不可）
+                "seikyu_code": s(row.get("請求先コード", "")),
             })
     return _ddc_list_cache
 
@@ -3610,6 +3612,28 @@ function isNoDoublePackPage(pageIdx) {
     return NO_DOUBLE_PACK_DDC_CODES.includes(code);
 }
 
+// 商品行単位の二重梱包不可判定
+// ルール: 請求先=PALTAC(1021) の納品先 かつ 9024 以外 かつ 商品名に「2Gummy」を含む
+//   → 二重梱包不可（1024=ヨーカ堂新田共配Cは例外で二重梱包可）
+const NO_DOUBLE_PACK_PALTAC_EXCEPT_CODE = '9024';
+function isNoDoublePackForItem(item, ddc) {
+    if (!item || !ddc) return false;
+    const nohinsakiCode = String(ddc.nohinsaki_code || ddc.code || '');
+    let seikyuCode = String(ddc.seikyu_code || '');
+    if (!seikyuCode && (nohinsakiCode || ddc.name)) {
+        // フォールバック: ddcMaster から引き直す（ddc_match に seikyu_code が入っていない場合）
+        const entry = ddcMaster.find(d =>
+            (nohinsakiCode && String(d.nohinsaki_code || '') === nohinsakiCode) ||
+            (ddc.name && d.name === ddc.name)
+        );
+        if (entry) seikyuCode = String(entry.seikyu_code || '');
+    }
+    if (seikyuCode !== '1021') return false;
+    if (nohinsakiCode === NO_DOUBLE_PACK_PALTAC_EXCEPT_CODE) return false;
+    const name = String(item.master_name || item.ocr_name || '');
+    return name.includes('2Gummy');
+}
+
 function applyNoDoublePackRule(pageIdx) {
     if (!isNoDoublePackPage(pageIdx)) return;
     const pr = pageResults[pageIdx];
@@ -3809,15 +3833,19 @@ function renderPage(idx) {
         const cls = it.matched ? 'matched' : 'unmatched';
         const name = it.matched ? it.master_name : it.ocr_name;
         const matchBadge = it.matched ? '<span class="badge badge-ok">OK</span>' : '<span class="badge badge-ng">NG</span>';
-        // 二重梱包 不可DDCなら強制リセット + ボタン無効化
-        const dpDisabled = isNoDoublePackPage(idx);
+        // 二重梱包 不可DDC or PALTAC×2Gummy なら強制リセット + ボタン無効化
+        const dpDisabledPage = isNoDoublePackPage(idx);
+        const dpDisabledItem = !dpDisabledPage && isNoDoublePackForItem(it, pageResults[idx].ddc_match);
+        const dpDisabled = dpDisabledPage || dpDisabledItem;
         if (dpDisabled) it.double_pack = false;
         const dpChecked = it.double_pack ? 'checked' : '';
         let dpStyle, dpLabel, dpTitle, dpAttr;
         if (dpDisabled) {
             dpStyle = 'background:#ccc;color:#666;cursor:not-allowed;text-decoration:line-through;';
             dpLabel = '不可';
-            dpTitle = 'この納品先(DDC)は二重梱包不可です';
+            dpTitle = dpDisabledPage
+                ? 'この納品先(DDC)は二重梱包不可です'
+                : 'PALTAC 納品先 × 2Gummy は二重梱包不可（納品先9024を除く）';
             dpAttr = 'disabled';
         } else {
             dpStyle = it.double_pack ? 'background:#E65100;color:#fff;' : 'background:#eee;color:#999;';
@@ -4150,7 +4178,9 @@ function updateExpiry(el) {
 }
 function toggleDoublePack(pageIdx, itemIdx, btn) {
     if (isNoDoublePackPage(pageIdx)) return;  // 不可DDCでは無視
-    const item = pageResults[pageIdx].matched_items[itemIdx];
+    const pr = pageResults[pageIdx];
+    const item = pr.matched_items[itemIdx];
+    if (isNoDoublePackForItem(item, pr.ddc_match)) return;  // PALTAC×2Gummy 不可
     item.double_pack = !item.double_pack;
     if (item.double_pack) {
         btn.textContent = '二重梱包';

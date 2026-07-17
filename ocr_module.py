@@ -693,6 +693,8 @@ def _ddc_row_to_dict(row):
         "nohinsaki_code": safe(row.get("納品先コード", "")),
         "torihikisaki": safe(row.get("取引先名", "")),
         "torihikisaki_code": safe(row.get("取引先コード", "")),
+        # 請求先コード: 二重梱包不可判定などで使用 (例: PALTAC=1021)
+        "seikyu_code": safe(row.get("請求先コード", "")),
         "postal": safe(row.get("郵便番号", "")),
         "address": safe(row.get("住所", "")),
         "tel": safe(row.get("電話番号", "")),

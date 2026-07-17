@@ -33,7 +33,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() in ('cp932', 'shift_jis',
 
 # ========== 定数 ==========
 
-STREAMLIT_URL = "https://logistics-cost-piu8hweufvy5pfm6mfvmcv.streamlit.app/"
+STREAMLIT_URL = "https://logistics-cost.pages.dev/"
 
 LOT_BREAK_HISTORY_CSV = r"G:\共有ドライブ\TWO\SCM\28_ロット割れ対応\lot_break_history.csv"
 

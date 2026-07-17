@@ -481,7 +481,7 @@ def load_torihikisaki_master_from_supabase() -> pd.DataFrame | None:
     # nohinsaki_master_scm（納品先マスタ）を全件取得
     rows = _paginated_get(
         "nohinsaki_master_scm",
-        "select=nohinsaki_code,nohinsaki_name,torihikisaki_code,yubin_bango,jusho,denwa_bango&is_active=eq.true"
+        "select=nohinsaki_code,nohinsaki_name,torihikisaki_code,yubin_bango,jusho,denwa_bango,seikyu_code&is_active=eq.true"
     )
     if not rows:
         return None
@@ -548,6 +548,7 @@ def load_torihikisaki_master_from_supabase() -> pd.DataFrame | None:
             "住所":       (r.get("jusho") or ""),
             "電話番号":   _sanitize_tel(r.get("denwa_bango")),
             "FAX番号":    "",
+            "請求先コード": (r.get("seikyu_code") or ""),
             "入荷時間":   (hc.get("arrival_time") or ""),
             "バース予約": (hc.get("basse_reservation") or ""),
             "パレット条件": (hc.get("pallet_condition") or ""),
