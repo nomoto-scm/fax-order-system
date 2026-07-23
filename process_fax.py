@@ -1395,6 +1395,40 @@ def results_to_logiless_csv(results, pdf_name):
         if not matched_items:
             continue
 
+        # AR列（荷送人名指定flg）: 各明細の実出荷元を記載
+        #   シルビア直送 → "シルビア" / ハルナ直送 → "ハルナ"
+        #   パートナー直送（野村不動産・エムズインク・POW BAR）→ "代理"
+        #   上記以外（自社倉庫経由＝ベルーナ・ニューイースト）→ "自社倉庫"
+        # 直送判定は COOLA の _is_direct_shipping と同じ（shipping_route 手動上書き優先、
+        # 未設定時は output_dest とパートナー別CS合計 10cs 以上で直送判定）
+        from collections import defaultdict as _dd
+        _cs_by_dest = _dd(int)
+        for _it in matched_items:
+            try:
+                _cs_by_dest[_it.get("output_dest") or ""] += int(float(_it.get("quantity") or 0))
+            except (TypeError, ValueError):
+                pass
+        _PARTNER_DESTS = ("野村不動産", "エムズインク", "POW BAR")
+        def _shipping_flg(it):
+            od = (it.get("output_dest") or "").strip()
+            route = (it.get("shipping_route") or "").strip()
+            if route == "warehouse":
+                is_direct = False
+            elif route == "direct":
+                is_direct = True
+            elif od in ("シルビア", "ハルナ"):
+                is_direct = _cs_by_dest[od] >= 10
+            elif od in _PARTNER_DESTS:
+                is_direct = True
+            else:
+                is_direct = False
+            if is_direct:
+                if od in ("シルビア", "ハルナ"):
+                    return od
+                if od in _PARTNER_DESTS:
+                    return "代理"
+            return "自社倉庫"
+
         groups = {}
         for item in matched_items:
             product_name = item.get("master_name", item.get("ocr_name", ""))
@@ -1495,6 +1529,8 @@ def results_to_logiless_csv(results, pdf_name):
                     "購入者住所３": addr3,
                     "購入者電話番号": dest_tel,
                     "コメント": logiless_comment,
+                    # AR列: 荷送人名指定flg（実出荷元: 自社倉庫/ハルナ/シルビア/代理）
+                    "荷送人名指定flg": _shipping_flg(item),
                     "品名": product_name,
                     "形式/型番": product_code,
                     "受注数": quantity_bara,
