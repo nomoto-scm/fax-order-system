@@ -1399,8 +1399,13 @@ def results_to_logiless_csv(results, pdf_name):
         #   シルビア直送 → "シルビア" / ハルナ直送 → "ハルナ"
         #   パートナー直送（野村不動産・エムズインク・POW BAR）→ "代理"
         #   上記以外（自社倉庫経由＝ベルーナ・ニューイースト）→ "自社倉庫"
-        # 直送判定は COOLA の _is_direct_shipping と同じ（shipping_route 手動上書き優先、
-        # 未設定時は output_dest とパートナー別CS合計 10cs 以上で直送判定）
+        # 判定順:
+        #   1. パートナー直送先（野村不動産・エムズインク・POW BAR）は「常に直送」なので
+        #      shipping_route に関係なく最優先で "代理"。
+        #      （web_app.py のサーバ側確定でパートナー先は route="warehouse" が入るため、
+        #        route を先に見ると誤って「自社倉庫」に落ちる。2026-07-23 修正）
+        #   2. シルビア/ハルナは shipping_route（手動上書き優先）、未設定時はCS合計10cs以上で直送。
+        #   3. 上記以外は「自社倉庫」（ベルーナ・ニューイースト経由）。
         from collections import defaultdict as _dd
         _cs_by_dest = _dd(int)
         for _it in matched_items:
@@ -1411,6 +1416,9 @@ def results_to_logiless_csv(results, pdf_name):
         _PARTNER_DESTS = ("野村不動産", "エムズインク", "POW BAR")
         def _shipping_flg(it):
             od = (it.get("output_dest") or "").strip()
+            # パートナー直送先は常に直送 → "代理"（route に依存しない）
+            if od in _PARTNER_DESTS:
+                return "代理"
             route = (it.get("shipping_route") or "").strip()
             if route == "warehouse":
                 is_direct = False
@@ -1418,15 +1426,10 @@ def results_to_logiless_csv(results, pdf_name):
                 is_direct = True
             elif od in ("シルビア", "ハルナ"):
                 is_direct = _cs_by_dest[od] >= 10
-            elif od in _PARTNER_DESTS:
-                is_direct = True
             else:
                 is_direct = False
-            if is_direct:
-                if od in ("シルビア", "ハルナ"):
-                    return od
-                if od in _PARTNER_DESTS:
-                    return "代理"
+            if is_direct and od in ("シルビア", "ハルナ"):
+                return od
             return "自社倉庫"
 
         groups = {}
