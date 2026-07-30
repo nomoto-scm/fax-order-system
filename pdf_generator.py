@@ -54,6 +54,8 @@ EMS_PRIMARY = colors.HexColor("#E65100")  # エムズインク（オレンジ）
 EMS_LIGHT = colors.HexColor("#FFF3E0")
 POW_PRIMARY = colors.HexColor("#6A1B9A")  # POW BAR（紫）
 POW_LIGHT = colors.HexColor("#F3E5F5")
+DAY_PRIMARY = colors.HexColor("#00695C")  # DAYLILY（ティール）
+DAY_LIGHT = colors.HexColor("#E0F2F1")
 
 # Data directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -884,5 +886,24 @@ def gen_powbar_pdf(order, items, staff_name="伊藤"):
         hide_price=True,
         quantity_label="数量",
         quantity_formatter=_powbar_qty_format,
+        default_remarks=_PARTNER_DEFAULT_REMARKS,
+    )
+
+
+def gen_daylily_pdf(order, items, staff_name="伊藤"):
+    """DAYLILY 向け 発注書PDF生成 (バラ袋単位)
+
+    対象商品: PROTEIN TAIWAN TEA 鉄観音茶 / 四季春茶（他社品・入数72）。
+    野村不動産・エムズインクと同じ「バラ袋数を入力」運用のため irisuu=1
+    （process_fax._get_irisuu を参照）。
+    """
+    return gen_partner_pdf(
+        order, items, staff_name,
+        primary_color=DAY_PRIMARY, light_color=DAY_LIGHT,
+        bar_label="DAYLILY様 発注書（出荷指示書）",
+        dest_company="DAYLILY 受注ご担当者様",
+        hide_price=True,
+        quantity_label="数量",
+        quantity_prefix="バラ", quantity_suffix="袋",
         default_remarks=_PARTNER_DEFAULT_REMARKS,
     )

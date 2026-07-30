@@ -1300,6 +1300,27 @@ def api_confirm():
         traceback.print_exc()
         return jsonify({"error": f"生成エラー: {repr(e)}"}), 500
 
+    # 先方から受領した発注書の原本を請求突合フォルダへ複製する。
+    # 他社品（7始まり）を含む受注のみ対象。単位の食い違いを実際に検知できるのは
+    # 生成発注書ではなくこの原本なので、こちらを本命として自動投入する。
+    try:
+        import po_archive
+        _r0 = next((r for r in results if "error" not in r), None)
+        if _r0:
+            _ocr0 = _r0.get("ocr_raw", {})
+            _copied = po_archive.archive_received_po(
+                results,
+                source_name=pdf_name,
+                src_bytes=sess.get("pdf_bytes"),
+                partner_name=_ocr0.get("sender") or "",
+                delivery_date=_ocr0.get("delivery_date") or "",
+                slip_number=_ocr0.get("order_no") or "",
+            )
+            if _copied:
+                print(f"[po_archive] 受領発注書を複製: {os.path.basename(_copied)}")
+    except Exception as pe:
+        print(f"[po_archive] 受領発注書の複製失敗（処理は続行）: {pe}")
+
     # Phase 4: ドラフト経由なら Supabase の status を confirmed に更新 + スナップショット保存
     draft_id = sess.get("draft_id")
     confirm_result = None

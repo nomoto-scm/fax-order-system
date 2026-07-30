@@ -36,13 +36,17 @@ from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from ocr_module import process_fax_pdf, load_staff
-from pdf_generator import gen_sylvia_pdf, gen_haruna_pdf, gen_nomura_pdf, gen_emsink_pdf, gen_powbar_pdf
+from pdf_generator import (
+    gen_sylvia_pdf, gen_haruna_pdf, gen_nomura_pdf, gen_emsink_pdf, gen_powbar_pdf,
+    gen_daylily_pdf,
+)
 
 # パートナー別 PDF生成器マップ (output_dest -> (関数, ファイル名プレフィックス))
 PARTNER_PDF_GENERATORS = {
     "野村不動産": (gen_nomura_pdf, "野村不動産"),
     "エムズインク": (gen_emsink_pdf, "エムズインク"),
     "POW BAR": (gen_powbar_pdf, "POWBAR"),
+    "DAYLILY": (gen_daylily_pdf, "DAYLILY"),
 }
 
 
@@ -785,7 +789,7 @@ def _get_irisuu(item):
     """商品マッチ結果から入数を取得する。case_quantity があればそれを使い、なければ1。
 
     パートナー直送先の単位扱い:
-    - 野村不動産 / エムズインク: ユーザー入力 = 袋数 → irisuu=1（NE CSVもそのまま袋数）
+    - 野村不動産 / エムズインク / DAYLILY: ユーザー入力 = 袋数 → irisuu=1（NE CSVもそのまま袋数）
     - POW BAR: ユーザー入力 = ボール数 → irisuu=12（1ボール=12袋、NE CSVには袋数で送る）
 
     case_quantity が item に無い/0 のときは、商品マスタから商品コード（無ければJAN）で
@@ -795,7 +799,7 @@ def _get_irisuu(item):
     output_dest = item.get("output_dest", "")
     if output_dest == "POW BAR":
         return 12  # 1ボール = 12袋
-    if output_dest in ("野村不動産", "エムズインク"):
+    if output_dest in ("野村不動産", "エムズインク", "DAYLILY"):
         return 1
     cq = item.get("case_quantity", 0)
     try:
@@ -1905,6 +1909,24 @@ def generate_pdfs(results, pdf_name, staff_name="伊藤"):
             with open(out_path, "wb") as f:
                 f.write(pdf_buf.read())
             generated.append((partner_name, out_path))
+
+            # 請求突合フォルダ（請求管理/input/発注書/）へ複製。
+            # 他社品の単位食い違い突合（check_po_reconcile.py）で使う。
+            # 失敗しても受注処理は止めない。
+            try:
+                import po_archive
+                copied = po_archive.archive_generated_po(
+                    out_path, partner_name,
+                    delivery_date=ocr.get("delivery_date", ""),
+                    slip_number=order_no,
+                    page=page_num,
+                    dest_name=dest_name,
+                    source_name=pdf_name,
+                )
+                if copied:
+                    print(f"      [po_archive] 生成発注書を複製: {os.path.basename(copied)}")
+            except Exception as pe:
+                print(f"      [po_archive] 生成発注書の複製失敗（処理は続行）: {pe}")
 
     return generated
 
