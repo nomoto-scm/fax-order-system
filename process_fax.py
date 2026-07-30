@@ -745,12 +745,52 @@ _TWO_ADDRESS = "東京都品川区西五反田2-24-4 THE CROSS GOTANDA 5階"
 _TWO_NAME = "株式会社ＴＷＯ"
 _TWO_TEL = "03-6839-0010"
 
+_IRISUU_MAP_CACHE = None
+
+
+def _load_irisuu_map():
+    """商品マスタから 商品コード / JAN → 入数(case_quantity) のマップを構築（プロセス内キャッシュ）。
+
+    case_quantity が item に乗っていない（=0）ケースの補完に使う。
+    確定スナップショットやブラウザ側の商品リストが古く入数0のまま届いても、
+    CSV生成時にマスタから正しい入数を引き直せるようにする。
+    """
+    global _IRISUU_MAP_CACHE
+    if _IRISUU_MAP_CACHE is not None:
+        return _IRISUU_MAP_CACHE
+    m = {}
+    try:
+        from supabase_client import load_product_master
+        df = load_product_master()
+        for _, r in df.iterrows():
+            try:
+                iri = int(r.get("入数", 0) or 0)
+            except (ValueError, TypeError):
+                iri = 0
+            if iri <= 0:
+                continue
+            code = str(r.get("商品コード", "") or "").strip()
+            jan = str(r.get("JANコード", "") or "").strip()
+            if code:
+                m[("code", code)] = iri
+            if jan:
+                m[("jan", jan)] = iri
+    except Exception as e:
+        print(f"  [irisuu] マスタ入数マップ構築失敗（フォールバックのみ使用）: {e}")
+    _IRISUU_MAP_CACHE = m
+    return m
+
+
 def _get_irisuu(item):
     """商品マッチ結果から入数を取得する。case_quantity があればそれを使い、なければ1。
 
     パートナー直送先の単位扱い:
     - 野村不動産 / エムズインク: ユーザー入力 = 袋数 → irisuu=1（NE CSVもそのまま袋数）
     - POW BAR: ユーザー入力 = ボール数 → irisuu=12（1ボール=12袋、NE CSVには袋数で送る）
+
+    case_quantity が item に無い/0 のときは、商品マスタから商品コード（無ければJAN）で
+    入数を引き直してフォールバックする（2026-07-28 追加。プルダウン選択でも入数が
+    乗らずバラ換算されない事象への恒久対策）。
     """
     output_dest = item.get("output_dest", "")
     if output_dest == "POW BAR":
@@ -762,7 +802,17 @@ def _get_irisuu(item):
         cq = int(cq or 0)
     except (ValueError, TypeError):
         cq = 0
-    return cq if cq > 0 else 1
+    if cq > 0:
+        return cq
+    # フォールバック: item に入数が乗っていない → マスタからコード/JANで補完
+    m = _load_irisuu_map()
+    code = str(item.get("code", "") or "").strip()
+    jan = str(item.get("jan", "") or "").strip()
+    if code and ("code", code) in m:
+        return m[("code", code)]
+    if jan and ("jan", jan) in m:
+        return m[("jan", jan)]
+    return 1
 
 
 def results_to_ne_csv(results, pdf_name):
