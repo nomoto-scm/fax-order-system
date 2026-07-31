@@ -398,18 +398,56 @@ def load_product_master_from_supabase() -> pd.DataFrame | None:
     return df
 
 
+# ── 期間限定の出力先（出庫元）上書き ──────────────────────────────
+# 一時的に出庫元が変わる商品をここに登録する。期間外になると自動でマスタ本来の
+# 出力先へ戻るので、戻し忘れが起きない。商品マスタ読込の一箇所で差し替えるため、
+# 出荷経路の自動判定・ロジレスCSVのAR列・発注書PDFの振り分けまで一括で揃う。
+#
+# JAN未登録商品は送料計算の jans_lot_break に載らず、出荷経路の自動判定が
+# 必ず「直送」に倒れる。そのため画面での手動切替が毎回必要になるが、
+# ここで出力先自体を「自社倉庫」にしておけば warehouse 固定になる。
+#
+# (商品コード, 上書き後の出力先, 開始日, 終了日, メモ)  ※日付は両端を含む
+TEMP_OUTPUT_DEST_OVERRIDES = [
+    ("1005038A0358", "自社倉庫", "2026-08-01", "2026-11-30",
+     "2Snack 香るトリュフ 15g: シルビア直送 → ベルーナ出庫"),
+]
+
+
+def _apply_temp_output_dest_overrides(df: pd.DataFrame) -> pd.DataFrame:
+    """TEMP_OUTPUT_DEST_OVERRIDES のうち、今日が期間内のものを商品マスタへ反映する。"""
+    from datetime import date
+
+    if df is None or len(df) == 0 or "商品コード" not in df.columns:
+        return df
+
+    today = date.today().isoformat()
+    for product_code, new_dest, start, end, note in TEMP_OUTPUT_DEST_OVERRIDES:
+        if not (start <= today <= end):
+            continue
+        mask = df["商品コード"].astype(str).str.strip() == product_code
+        if not mask.any():
+            print(f"  [出力先上書き] 商品コード {product_code} がマスタに見つかりません（スキップ）")
+            continue
+        old_dest = str(df.loc[mask, "出力先"].iloc[0])
+        df.loc[mask, "出力先"] = new_dest
+        print(f"  [出力先上書き] {product_code} {old_dest or '(空)'} → {new_dest} "
+              f"（{start}〜{end}）{note}")
+    return df
+
+
 def load_product_master() -> pd.DataFrame:
     """商品マスタを読み込む（Supabase優先、フォールバックはCSV）"""
     df = load_product_master_from_supabase()
     if df is not None and len(df) > 0:
         jan_count = (df["JANコード"].str.len() > 0).sum()
         print(f"  [Supabase] 商品マスタ(product_master_scm): {len(df)}件読み込み（JAN登録: {jan_count}件）")
-        return df
+        return _apply_temp_output_dest_overrides(df)
 
     # フォールバック: ローカルCSV
     csv_path = os.path.join(_DATA_DIR, "product_master.csv")
     print(f"  [CSV] 商品マスタ読み込み: {csv_path}")
-    return pd.read_csv(csv_path, dtype={"JANコード": str})
+    return _apply_temp_output_dest_overrides(pd.read_csv(csv_path, dtype={"JANコード": str}))
 
 
 def load_shipping_rules_from_supabase() -> list[dict] | None:
