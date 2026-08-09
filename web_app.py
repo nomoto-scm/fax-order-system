@@ -174,6 +174,28 @@ def api_confirmed_orders():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/confirmed_orders/search")
+def api_confirmed_orders_search():
+    """確定済み受注を全期間から検索してJSONで返す（days制限なし・サーバー側フィルタ）。"""
+    from supabase_client import search_confirmed_orders
+    partner = (request.args.get("q_partner") or "").strip() or None
+    dest = (request.args.get("q_dest") or "").strip() or None
+    delivery_date = (request.args.get("q_date") or "").strip() or None
+    slip = (request.args.get("q_slip") or "").strip() or None
+    source = request.args.get("source") or None
+    if not any([partner, dest, delivery_date, slip]):
+        return jsonify({"error": "検索条件を1つ以上入力してください", "orders": [], "count": 0}), 400
+    try:
+        rows = search_confirmed_orders(partner=partner, dest=dest,
+                                       delivery_date=delivery_date, slip=slip,
+                                       source_channel=source, limit=1000)
+        return jsonify({"orders": rows, "count": len(rows), "search": True})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/pending_orders")
 def api_pending_orders():
     """保留中受注（status='draft' or 'error'）の一覧をJSONで返す"""
@@ -2414,6 +2436,14 @@ CONFIRMED_ORDERS_TEMPLATE = r"""<!DOCTYPE html>
             style="padding:5px 12px; border:1px solid #ccc; background:#f8f8f8; border-radius:4px; cursor:pointer; font-size:12px;">
       クリア
     </button>
+    <button onclick="searchAllHistory()"
+            style="padding:5px 12px; border:1px solid #6A1B9A; background:#F3E5F5; color:#6A1B9A; border-radius:4px; cursor:pointer; font-size:12px; font-weight:600;">
+      🌐 全期間から検索
+    </button>
+    <button onclick="backToRecent()" id="backToRecentBtn"
+            style="display:none; padding:5px 12px; border:1px solid #ccc; background:#f8f8f8; border-radius:4px; cursor:pointer; font-size:12px;">
+      ← 最新に戻る
+    </button>
   </div>
 
   <div id="content">
@@ -2459,6 +2489,9 @@ let filteredOrders = [];  // 検索フィルタ適用後（描画用）
 
 async function loadOrders(source, isReload) {
   if (source !== undefined && source !== null) currentSource = source;
+  // 全期間検索モードを解除（通常表示に戻す）
+  const _backBtn = document.getElementById('backToRecentBtn');
+  if (_backBtn) _backBtn.style.display = 'none';
 
   document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
   const btnId = currentSource === '' ? 'btn-all' : `btn-${currentSource}`;
@@ -2471,7 +2504,7 @@ async function loadOrders(source, isReload) {
     const days = document.getElementById('daysSelect').value;
     const params = new URLSearchParams();
     if (currentSource) params.set('source', currentSource);
-    if (days) params.set('days', days);
+    params.set('days', days);  // "" のときは全期間（サーバー側で days=None 扱い＝全件）
     const url = '/api/confirmed_orders' + (params.toString() ? '?' + params.toString() : '');
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2526,6 +2559,45 @@ function clearFilters() {
   document.getElementById('filterDeliveryDate').value = '';
   document.getElementById('filterSlip').value = '';
   applyFilter();
+}
+
+// 全期間からサーバー側検索（確定済み・days制限なし・最新200件の枠を超えて探せる）
+async function searchAllHistory() {
+  const partner = (document.getElementById('filterPartner').value || '').trim();
+  const dest = (document.getElementById('filterDest').value || '').trim();
+  const date = (document.getElementById('filterDeliveryDate').value || '').trim();
+  const slip = (document.getElementById('filterSlip').value || '').trim();
+  if (!partner && !dest && !date && !slip) {
+    alert('全期間から検索するには、取引先・納品先・納品日・伝票No のいずれかを入力してください。');
+    return;
+  }
+  document.getElementById('content').innerHTML = '<div class="loading">全期間から検索中...</div>';
+  try {
+    const params = new URLSearchParams();
+    if (currentSource) params.set('source', currentSource);
+    if (partner) params.set('q_partner', partner);
+    if (dest) params.set('q_dest', dest);
+    if (date) params.set('q_date', date);
+    if (slip) params.set('q_slip', slip);
+    const res = await fetch('/api/confirmed_orders/search?' + params.toString());
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
+    currentOrders = data.orders || [];
+    filteredOrders = currentOrders;
+    const backBtn = document.getElementById('backToRecentBtn');
+    if (backBtn) backBtn.style.display = '';
+    renderTable();
+    const n = currentOrders.length;
+    document.getElementById('summary').textContent =
+      '全期間検索: ' + n + '件' + (n >= 1000 ? '（上限1000件・条件を絞ってください）' : '');
+  } catch (err) {
+    document.getElementById('content').innerHTML = '<div class="empty">検索失敗: ' + err.message + '</div>';
+  }
+}
+
+// 通常表示（最新）に戻す
+function backToRecent() {
+  loadOrders(currentSource, true);
 }
 
 function renderTable() {

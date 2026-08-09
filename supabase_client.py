@@ -306,6 +306,51 @@ def fetch_confirmed_orders(limit: int = 200, source_channel: str | None = None,
     return rows if rows is not None else []
 
 
+def search_confirmed_orders(partner: str | None = None, dest: str | None = None,
+                            delivery_date: str | None = None, slip: str | None = None,
+                            source_channel: str | None = None, limit: int = 1000) -> list[dict]:
+    """確定済受注（status='confirmed'）を全期間から検索する（サーバー側フィルタ）。
+
+    `/confirmed` の「全期間から検索」用。fetch_confirmed_orders と違い days 制限なし。
+    指定された条件を AND で絞り込む（文字項目は部分一致 ilike、納品日は完全一致）。
+
+    Args:
+        partner: 取引先名（部分一致）
+        dest: 納品先名（部分一致）
+        delivery_date: 納品日 YYYY-MM-DD（完全一致）
+        slip: 伝票No（部分一致）
+        source_channel: 'efax' / 'paltac' / None（すべて）
+        limit: 取得上限（安全弁）
+    """
+    from urllib.parse import quote
+    cols = (
+        "id,source_channel,status,slip_number,order_date,delivery_date,"
+        "partner_name,delivery_location_name,grand_total,ddc_matched,"
+        "warehouse,shipping_type,status_flags,source_file_name,"
+        "source_email_from,source_email_received_at,ocr_page_no,created_at,"
+        "confirmed_at,confirmed_by,confirmation_count,"
+        "shipping_fee,shipping_fee_two_burden"
+    )
+    query_parts = [
+        f"select={cols}",
+        "status=eq.confirmed",
+        "order=confirmed_at.desc",
+        f"limit={limit}",
+    ]
+    if source_channel:
+        query_parts.append(f"source_channel=eq.{source_channel}")
+    if partner:
+        query_parts.append(f"partner_name=ilike.*{quote(partner, safe='')}*")
+    if dest:
+        query_parts.append(f"delivery_location_name=ilike.*{quote(dest, safe='')}*")
+    if delivery_date:
+        query_parts.append(f"delivery_date=eq.{quote(delivery_date, safe='')}")
+    if slip:
+        query_parts.append(f"slip_number=ilike.*{quote(slip, safe='')}*")
+    rows = _supabase_get("fax_orders_scm", "&".join(query_parts))
+    return rows if rows is not None else []
+
+
 def fetch_order_with_items(order_id: str) -> dict | None:
     """ヘッダー1件と紐づく明細を取得する（確認画面の詳細表示用）"""
     header_rows = _supabase_get("fax_orders_scm", f"id=eq.{order_id}&select=*")

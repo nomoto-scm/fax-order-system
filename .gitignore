@@ -3,3 +3,5 @@
 output/
 __pycache__/
 *.pyc
+service-account.json
+FAX受注_起動.command
