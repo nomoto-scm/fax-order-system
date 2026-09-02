@@ -184,12 +184,14 @@ OCR_PROMPT = """このFAX発注書の画像を正確に読み取り、以下のJ
 2. ２Snack香るトリュフ（JAN: 4589570801416）入数12袋/cs
 3. ２Snack焦がしガーリック（JAN: 4589570801430）入数12袋/cs
 4. ２Snack濃厚ガトーショコラ風サブレ（JAN: 4589570801454）入数12袋/cs
-5. 2Water Ceramide（JAN: 4589570801485）入数24本/cs
-6. 2Gummy LIPOSOME VC（JAN: 4589570801331）入数48袋/cs
-7. 2Gummy リポ Fe(鉄)（JAN: 4589570801744）入数48袋/cs
-8. 2Gummy リポソーム VD（JAN: 4589570801768）入数48袋/cs
-9. 2Energy 250ml（JAN: 4589570801348）入数30本/cs
-10. 2Energy 250ml 26RN（JAN: 4589570801621）入数30本/cs
+5. 2Water Ceramide 500ml（JAN: 4589570801485）入数24本/cs
+6. 2Water Ceramide 2L（JAN: 4589570801683）入数6本/cs
+7. 2Water Sparkling 500ml（JAN: 4589570801607）入数24本/cs
+8. 2Gummy LIPOSOME VC（JAN: 4589570801331）入数48袋/cs
+9. 2Gummy リポ Fe(鉄)（JAN: 4589570801744）入数48袋/cs
+10. 2Gummy リポソーム VD（JAN: 4589570801768）入数48袋/cs
+11. 2Energy 250ml（JAN: 4589570801348）入数30本/cs
+12. 2Energy 250ml 26RN（JAN: 4589570801621）入数30本/cs
 
 読み取りルール：
 - 商品名が読みにくい場合、JANコード（4589570801で始まる13桁）から上記リストで特定してください。
