@@ -1860,7 +1860,7 @@ def generate_pdfs(results, pdf_name, staff_name="伊藤"):
                 "method": ddc.get("method", ""),
                 "notes": ddc.get("notes", ""),
             }
-            pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name)
+            pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name, items=haruna_items)
             out_name = f"ハルナ_{base_name}_p{page_num}.pdf"
             out_path = os.path.join(OUTPUT_DIR, out_name)
             _archive_existing_file(out_path)

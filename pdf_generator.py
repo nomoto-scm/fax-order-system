@@ -377,7 +377,7 @@ def gen_sylvia_pdf(order, items, staff_name="伊藤"):
 
 
 # ========== Haruna PDF ==========
-def gen_haruna_pdf(order, ddc, staff_name="伊藤"):
+def gen_haruna_pdf(order, ddc, staff_name="伊藤", items=None):
     """ハルナプロデュース様 発注書PDF生成。
 
     order に 'confirmed_at' キー（例: "2026-04-30 14:30"）を入れると、日付の右隣に
@@ -553,20 +553,47 @@ def gen_haruna_pdf(order, ddc, staff_name="伊藤"):
     c.setFillColor(colors.black)
     y -= prod_hdr_h
 
-    qty = order['quantity']
-    bara = qty * 24
-    bg = colors.HexColor("#EBF5FB")
-    draw_table_row(c, ml, y, prod_cols, uw, prod_row_h, fill_color=bg)
-    ty = cell_mid_y(y, prod_row_h, 11)
-    draw_clipped(c, "2Water Ceramide", ml + prod_cols[0][0] * mm + pad, ty, 89 * mm, 12)
-    draw_clipped(c, "500ml\xd724本", ml + prod_cols[1][0] * mm + pad, ty, 29 * mm, 10)
-    draw_clipped(c, "24本/cs", ml + prod_cols[2][0] * mm + pad, ty, 25 * mm, 10)
-    c.setFont(FONT, 13)
-    c.drawRightString(ml + (prod_cols[3][0] + prod_cols[3][1]) * mm - pad, ty, str(qty))
-    c.drawRightString(ml + (prod_cols[4][0] + prod_cols[4][1]) * mm - pad, ty, "{:,}".format(bara))
-    y -= prod_row_h
+    # 明細は items（商品マスタでマッチ済み）から組む。
+    # items が無い呼び出しは従来どおり order['quantity'] の1行にフォールバックする。
+    rows = []
+    for it in (items or []):
+        try:
+            iq = int(it.get("quantity", 0) or 0)
+        except (ValueError, TypeError):
+            iq = 0
+        try:
+            cq = int(it.get("case_quantity", 0) or 0)
+        except (ValueError, TypeError):
+            cq = 0
+        cq = cq or 24
+        rows.append({
+            "name": safe_str(it.get("master_name", "")),
+            "spec": safe_str(it.get("spec", "")),
+            "pack": safe_str(it.get("pack", "")),
+            "qty": iq,
+            "bara": iq * cq,
+        })
+    if not rows:
+        qty = int(order.get('quantity', 0) or 0)
+        rows.append({
+            "name": "2Water Ceramide", "spec": "500ml\xd724本",
+            "pack": "24本/cs", "qty": qty, "bara": qty * 24,
+        })
 
-    for _ in range(3):
+    bara = sum(r["bara"] for r in rows)
+    bg = colors.HexColor("#EBF5FB")
+    for r in rows:
+        draw_table_row(c, ml, y, prod_cols, uw, prod_row_h, fill_color=bg)
+        ty = cell_mid_y(y, prod_row_h, 11)
+        draw_clipped(c, r["name"], ml + prod_cols[0][0] * mm + pad, ty, 89 * mm, 12)
+        draw_clipped(c, r["spec"], ml + prod_cols[1][0] * mm + pad, ty, 29 * mm, 10)
+        draw_clipped(c, r["pack"], ml + prod_cols[2][0] * mm + pad, ty, 25 * mm, 10)
+        c.setFont(FONT, 13)
+        c.drawRightString(ml + (prod_cols[3][0] + prod_cols[3][1]) * mm - pad, ty, str(r["qty"]))
+        c.drawRightString(ml + (prod_cols[4][0] + prod_cols[4][1]) * mm - pad, ty, "{:,}".format(r["bara"]))
+        y -= prod_row_h
+
+    for _ in range(max(0, 4 - len(rows))):
         draw_table_row(c, ml, y, prod_cols, uw, prod_row_h)
         y -= prod_row_h
 

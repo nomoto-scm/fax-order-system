@@ -688,7 +688,7 @@ def process_file(pdf_path, staff_name="伊藤", remarks="", source_label="FAX", 
                     "method": ddc.get("method", "") if ddc_matched else "",
                     "notes": ddc.get("notes", "") if ddc_matched else "",
                 }
-                pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name)
+                pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name, items=haruna_items)
                 haruna_pdf_name = f"ハルナ_{base_name}_p{page_num}.pdf"
                 out_path = os.path.join(OUTPUT_FOLDER, haruna_pdf_name)
                 with open(out_path, "wb") as f:
@@ -1086,7 +1086,7 @@ def _process_results(results, pdf_path, staff_name="伊藤", remarks="", model="
                     "method": ddc.get("method", "") if ddc_matched else "",
                     "notes": ddc.get("notes", "") if ddc_matched else "",
                 }
-                pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name)
+                pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name, items=haruna_items)
                 haruna_pdf_name = f"ハルナ_{base_name}_p{page_num}.pdf"
                 out_path = os.path.join(OUTPUT_FOLDER, haruna_pdf_name)
                 with open(out_path, "wb") as f:
