@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_module import process_fax_pdf, load_staff
 from pdf_generator import (
     gen_sylvia_pdf, gen_haruna_pdf, gen_nomura_pdf, gen_emsink_pdf, gen_powbar_pdf,
+    haruna_pdf_filename,
     gen_daylily_pdf,
 )
 
@@ -1861,7 +1862,9 @@ def generate_pdfs(results, pdf_name, staff_name="伊藤"):
                 "notes": ddc.get("notes", ""),
             }
             pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name, items=haruna_items)
-            out_name = f"ハルナ_{base_name}_p{page_num}.pdf"
+            out_name = haruna_pdf_filename(
+                dest_name, ocr.get("delivery_date", ""), order_no, page_num
+            )
             out_path = os.path.join(OUTPUT_DIR, out_name)
             _archive_existing_file(out_path)
             with open(out_path, "wb") as f:

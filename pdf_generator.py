@@ -1,6 +1,7 @@
 """PDF generator - Sylvia v12 / Haruna final version (Windows compatible)"""
 import os
 import json
+import re
 import pandas as pd
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import mm
@@ -374,6 +375,31 @@ def gen_sylvia_pdf(order, items, staff_name="伊藤"):
     c.save()
     buf.seek(0)
     return buf
+
+
+# ========== ファイル名生成 ==========
+# Windows/Google共有ドライブで使えない文字（納品先マスタに全角スペースや
+# 末尾の " が混じっている行があるため、ファイル名化する前に必ず通す）
+_FILENAME_NG = re.compile(r'[\\/:*?"<>|\r\n\t]')
+
+
+def sanitize_filename_part(text, fallback="不明"):
+    """ファイル名の一部として使える文字列に整える。"""
+    s = _FILENAME_NG.sub("", str(text or ""))
+    s = re.sub(r"[\s\u3000]+", " ", s).strip(" .")
+    return s or fallback
+
+
+def haruna_pdf_filename(dest_name, delivery_date, order_no, page_num):
+    """ハルナ発注書PDFのファイル名を組み立てる。
+
+    形式: 納品先名_納品日_ハルナ発注書_オーダーNO_pページ.pdf
+    例:   京浜ＤＤＣ_2026-08-20_ハルナ発注書_260810001_p1.pdf
+    """
+    dest = sanitize_filename_part(dest_name, "納品先不明")
+    ddate = sanitize_filename_part(delivery_date, "納品日不明")
+    ono = sanitize_filename_part(order_no, "オーダーNO不明")
+    return f"{dest}_{ddate}_ハルナ発注書_{ono}_p{page_num}.pdf"
 
 
 # ========== Haruna PDF ==========

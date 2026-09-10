@@ -40,7 +40,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() in ('cp932', 'shift_jis',
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from ocr_module import process_fax_pdf
-from pdf_generator import gen_sylvia_pdf, gen_haruna_pdf
+from pdf_generator import gen_sylvia_pdf, gen_haruna_pdf, haruna_pdf_filename
 from shipping_judge import judge_shipping, judge_warehouse, check_lot_alert, check_lead_time_alert
 from supabase_client import insert_fax_order, check_fax_order_exists
 from drive_api_client import get_drive_client, LocalDriveClient, DriveFile
@@ -689,7 +689,9 @@ def process_file(pdf_path, staff_name="伊藤", remarks="", source_label="FAX", 
                     "notes": ddc.get("notes", "") if ddc_matched else "",
                 }
                 pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name, items=haruna_items)
-                haruna_pdf_name = f"ハルナ_{base_name}_p{page_num}.pdf"
+                haruna_pdf_name = haruna_pdf_filename(
+                    dest_name, ocr.get("delivery_date", ""), order_no, page_num
+                )
                 out_path = os.path.join(OUTPUT_FOLDER, haruna_pdf_name)
                 with open(out_path, "wb") as f:
                     f.write(pdf_buf.read())
@@ -1087,7 +1089,9 @@ def _process_results(results, pdf_path, staff_name="伊藤", remarks="", model="
                     "notes": ddc.get("notes", "") if ddc_matched else "",
                 }
                 pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name, items=haruna_items)
-                haruna_pdf_name = f"ハルナ_{base_name}_p{page_num}.pdf"
+                haruna_pdf_name = haruna_pdf_filename(
+                    dest_name, ocr.get("delivery_date", ""), order_no, page_num
+                )
                 out_path = os.path.join(OUTPUT_FOLDER, haruna_pdf_name)
                 with open(out_path, "wb") as f:
                     f.write(pdf_buf.read())
