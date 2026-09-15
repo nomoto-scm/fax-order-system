@@ -173,7 +173,8 @@ OCR_PROMPT = """このFAX発注書の画像を正確に読み取り、以下のJ
       "product_code": "商品コード",
       "quantity_cs": "ケース数（CS単位の数値のみ）",
       "unit_price": "単価（数値、あれば）",
-      "amount": "金額（数値、あれば）"
+      "amount": "金額（数値、あれば）",
+      "delivery_dest": "この明細行の納品先（表に納品先列がある場合のみ。無ければ空文字）"
     }
   ],
   "notes": "備考・特記事項"
@@ -217,12 +218,158 @@ OCR_PROMPT = """このFAX発注書の画像を正確に読み取り、以下のJ
 - 左上の「○○商事（株）御中」はFAXの宛先（受信者）なので delivery_dest には使わないこと。
 - 「函数」列の数字が quantity_cs です（「入数」列の12入等と混同しないこと）。
 
-【入荷場所が複数記載されている場合】
-- 伝票に入荷場所・納品先が複数箇所に記載されているフォーマットがあります。
+【明細表に「納品先」列があるフォーマット（1行＝1納品先）】
+- 表のヘッダに「納品先」「納品先（SEJ）」「届け先」「センター」等の列があり、
+  行ごとに異なる納品先と数量が並んでいるフォーマットがあります。
+  （例：伊藤忠食品のSEJ向け発注書。1枚に1商品、行ごとに納品先＋ケース数が16行並ぶ）
+- この場合は **表の全行を1行も省略せず** items に出力し、各itemの delivery_dest に
+  その行の納品先名をそのまま入れてください。行数が20行を超えても必ず全行出力すること。
+- 同じ商品名・同じ商品コードが全行に繰り返されていても、納品先が違えば別の行として出力すること
+  （重複とみなして省略しないこと）。
+- このフォーマットではトップレベルの delivery_dest には1行目の納品先を入れてください。
+
+【入荷場所が複数記載されている場合（上記の「納品先」列が無いフォーマット）】
+- 明細表に納品先列が無く、伝票のヘッダ等に入荷場所・納品先が複数箇所に記載されている
+  フォーマットがあります。
 - その場合は **一番上（最初）に記載されている入荷場所** を delivery_dest として読み取ってください。
 - 下段の入荷場所コードやライフ番号等は無視してください。
 
 - JSONのみを返してください。説明文やマークダウンは不要です。"""
+
+
+def expand_multi_dest_ocr(ocr_result):
+    """明細行ごとに納品先が指定された発注書を、納品先単位のOCR結果に分割する。
+
+    伊藤忠食品のSEJ向け発注書のように「1枚＝1商品／行ごとに納品先＋ケース数」という
+    フォーマットでは、1ページから複数の納品先ぶんの受注が起きる。
+    従来はページ単位で delivery_dest が1つしか持てず、先頭行の納品先しか取り込めなかった。
+
+    Args:
+        ocr_result: ocr_fax_page() が返したdict
+
+    Returns:
+        [(dest_seq, ocr_dict), ...]
+        dest_seq は表の上からの1始まり連番（発注番号の枝番に使う）。
+        分割が不要なフォーマットでは [(0, ocr_result)] を返す（従来動作）。
+    """
+    items = ocr_result.get("items") or []
+    if not items:
+        return [(0, ocr_result)]
+
+    header_dest = normalize(ocr_result.get("delivery_dest") or "")
+
+    groups = []       # [[key, dest_name, [item, ...]], ...] 表の出現順を保持
+    index = {}        # key -> groups内のインデックス
+    last_dest = ""
+    distinct_row_dests = set()
+
+    for it in items:
+        row_dest = normalize(it.get("delivery_dest") or "")
+        if row_dest:
+            distinct_row_dests.add(normalize_company(row_dest))
+            last_dest = row_dest
+        # 納品先が空の行は直前行の続き（セル結合）とみなし、先頭行ならヘッダの納品先に寄せる
+        dest = row_dest or last_dest or header_dest
+        key = normalize_company(dest)
+        if key not in index:
+            index[key] = len(groups)
+            groups.append([key, dest, []])
+        groups[index[key]][2].append(it)
+
+    # 行ごとの納品先が1種類以下なら従来どおりページ単位で扱う
+    if len(distinct_row_dests) <= 1 or len(groups) <= 1:
+        return [(0, ocr_result)]
+
+    # ページ全体のチェーン（取引先）を多数決で決める。
+    # 「福岡ＳＥＪ倉」等でSEJが読めた行があれば、略号が落ちた行にも同じ取引先を適用する。
+    page_chain = ""
+    for _key, dest, _items in groups:
+        hint = _chain_hint(dest)
+        if hint:
+            page_chain = hint
+            break
+
+    base_no = str(ocr_result.get("order_no") or "").strip()
+    expanded = []
+    for seq, (_key, dest, group_items) in enumerate(groups, start=1):
+        sub = dict(ocr_result)
+        sub["delivery_dest"] = dest
+        sub["chain_hint"] = page_chain
+        sub["items"] = group_items
+        # 発注番号は納品先ごとに弊社で付番する: FAX原本の発注No + 行順の枝番
+        sub["order_no"] = f"{base_no}-{seq:02d}" if base_no else ""
+        sub["source_order_no"] = base_no
+        sub["dest_seq"] = seq
+        expanded.append((seq, sub))
+    return expanded
+
+
+def _dest_merge_key(page_result):
+    """納品先統合用のキー。納品先マスタに当たっていればコード、未マッチならOCR名で寄せる。"""
+    ddc = page_result.get("ddc_match") or {}
+    if ddc.get("matched") and ddc.get("nohinsaki_code"):
+        dest_key = ("code", str(ddc["nohinsaki_code"]))
+    elif ddc.get("matched") and ddc.get("name"):
+        dest_key = ("name", normalize_company(ddc["name"]))
+    else:
+        ocr = page_result.get("ocr_raw") or {}
+        dest_key = ("ocr", normalize_company(ocr.get("delivery_dest") or ""))
+    delivery_date = str((page_result.get("ocr_raw") or {}).get("delivery_date") or "")
+    return (dest_key, delivery_date)
+
+
+def merge_multi_dest_results(results):
+    """「1商品1枚」形式で複数ページに分かれた発注書を納品先単位に統合する。
+
+    例: 1枚目=リポソームVC×16納品先 / 2枚目=リポソームVD×16納品先 の発注書は、
+    統合後は「納品先16件、各2明細」になる。実配送が納品先あたり1回なので、
+    送料計算・出荷指示が二重計上されるのを防ぐ。
+
+    統合対象は multi_dest フラグが立った結果のみ（従来フォーマットの挙動は変えない）。
+    納品先マスタに当たらなかった行は統合せずそのまま残し、画面で修正できるようにする。
+    """
+    merged = []
+    index = {}    # merge key -> merged内のインデックス
+
+    for r in results:
+        if "error" in r or not r.get("multi_dest"):
+            merged.append(r)
+            continue
+        ddc = r.get("ddc_match") or {}
+        if not ddc.get("matched"):
+            # 納品先未確定のまま統合すると誤マージになるため単独で残す
+            merged.append(r)
+            continue
+
+        key = _dest_merge_key(r)
+        if key not in index:
+            index[key] = len(merged)
+            r["source_order_nos"] = [n for n in [
+                (r.get("ocr_raw") or {}).get("source_order_no"),
+            ] if n]
+            merged.append(r)
+            continue
+
+        target = merged[index[key]]
+        target["matched_items"] = list(target.get("matched_items", [])) + list(r.get("matched_items", []))
+        src_no = (r.get("ocr_raw") or {}).get("source_order_no")
+        if src_no and src_no not in target.get("source_order_nos", []):
+            target.setdefault("source_order_nos", []).append(src_no)
+        # 統合元ページを追跡できるようにする（画像プレビュー・監査用）
+        target.setdefault("merged_image_pages", [target.get("image_page")])
+        if r.get("image_page") not in target["merged_image_pages"]:
+            target["merged_image_pages"].append(r.get("image_page"))
+
+    # 出力先別リストを統合後の明細で組み直し、ページ番号を通し番号に振り直す
+    for i, r in enumerate(merged, start=1):
+        r["page"] = i
+        if "error" in r:
+            continue
+        items = r.get("matched_items", [])
+        r["sylvia_items"] = [x for x in items if x.get("matched") and x.get("output_dest") == "シルビア"]
+        r["haruna_items"] = [x for x in items if x.get("matched") and x.get("output_dest") == "ハルナ"]
+        r["warehouse_items"] = [x for x in items if x.get("matched") and x.get("output_dest") == "自社倉庫"]
+    return merged
 
 
 def ocr_fax_page(image_b64, model="claude-sonnet-4-6"):
@@ -250,7 +397,7 @@ def ocr_fax_page(image_b64, model="claude-sonnet-4-6"):
         try:
             response = client.messages.create(
                 model=model,
-                max_tokens=2000,
+                max_tokens=16000,
                 messages=[{
                     "role": "user",
                     "content": [
@@ -444,6 +591,81 @@ def _parts_score(ocr, master):
     return best
 
 
+# 物流センター名から「地名」だけを抜き出すためのノイズ語
+# 例: 「大正SEJ倉＜常温＞」→「大正」 / 「常温大阪大正センター(伊藤忠商事（株）)」→「大阪大正」
+_CENTER_NOISE_RE = None
+
+
+def _center_place_key(s):
+    """物流センター名から地名部分を抽出する（センター名表記ゆれの吸収用）。
+
+    発注書側とマスタ側で同じセンターの呼び方が大きく違うケースがある。
+    例) 伊藤忠食品のSEJ向け発注書:
+        FAX  「大正ＳＥＪ倉＜常温＞」「常温一括大津物流センター」
+        マスタ「常温大阪大正センター(伊藤忠商事（株）)」「常温大津センター(伊藤忠商事（株）)」
+    温度帯・施設種別・運営会社の括弧書きを落とすと地名だけが残り、突合できる。
+
+    地名が取れない場合は空文字を返す（＝この判定は使わない）。
+    """
+    global _CENTER_NOISE_RE
+    import re
+    if _CENTER_NOISE_RE is None:
+        _CENTER_NOISE_RE = re.compile(
+            r'[<＜〈《\[【][^>＞〉》\]】]*[>＞〉》\]】]'   # ＜常温＞ 〈常温〉 等の括弧書き
+            r'|[（(][^）)]*[）)]'                        # (伊藤忠商事（株）) 等の運営会社
+            r'|常温一括|一括|常温|冷蔵|冷凍|チルド|定温'      # 温度帯・一括区分
+            r'|ＳＥＪ|SEJ'                                # チェーン略号
+            r'|物流センター|センター|デポ|倉庫|倉|ＤＣ|DC|Ｃ'  # 施設種別
+        )
+    t = normalize_company(s)
+    t = _CENTER_NOISE_RE.sub('', t)
+    return re.sub(r'[\s　・]+', '', t).strip()
+
+
+# 発注書の納品先名に現れるチェーン略号 → 納品先マスタ「取引先名」に含まれる語
+_CHAIN_HINTS = [
+    ("SEJ", "セブンイレブン"),
+    ("セブンイレブン", "セブンイレブン"),
+    ("セブン－イレブン", "セブンイレブン"),
+]
+
+
+def _chain_hint(dest_name):
+    """納品先名からチェーン（取引先）を推定する。不明なら空文字。
+
+    「広島ＳＥＪ倉」のように地名＋チェーン略号で書かれる発注書があり、
+    地名だけで突合すると他チェーンの同名センター（イオン広島物流センター等）に
+    誤ヒットする。略号が読み取れた場合は取引先を絞り込むために使う。
+    """
+    t = normalize(dest_name).upper()
+    for token, chain in _CHAIN_HINTS:
+        if token.upper() in t:
+            return chain
+    return ""
+
+
+def _center_place_score(dest_company, master_company):
+    """地名ベースでセンター名を突合したスコア。判定不能なら 0.0。
+
+    新しいヒューリスティックなので上限を 0.90 に抑え、必ず「要確認」扱いにする
+    （match_ddc は 0.92 未満を low_confidence とする）。誤確定より目視1回を優先。
+    """
+    # 施設名らしさが無い文字列には適用しない（社名同士の比較に効かせない）
+    import re
+    if not re.search(r'センター|倉|デポ|ＤＣ|DC', dest_company + master_company):
+        return 0.0
+    a = _center_place_key(dest_company)
+    b = _center_place_key(master_company)
+    if len(a) < 2 or len(b) < 2:
+        return 0.0
+    if a == b:
+        return 0.90
+    # 「大正」⊂「大阪大正」のように、片方が府県名等を余分に持つケース
+    if a in b or b in a:
+        return 0.88
+    return 0.0
+
+
 def _score_ddc(dest_name_clean, dest_company, master_name, master_company):
     """DDCマッチスコアを算出する（内部関数）"""
     # 通常の正規化でスコア算出
@@ -477,7 +699,7 @@ def _score_ddc(dest_name_clean, dest_company, master_name, master_company):
     return best
 
 
-def match_ddc(dest_name, ddc_master, max_candidates=3, sender=""):
+def match_ddc(dest_name, ddc_master, max_candidates=3, sender="", chain=""):
     """Match delivery destination name to DDC master.
 
     Args:
@@ -485,6 +707,9 @@ def match_ddc(dest_name, ddc_master, max_candidates=3, sender=""):
         ddc_master: 納品先マスタ DataFrame
         max_candidates: 返す候補数
         sender: 発注元会社名（OCRから取得）。マスタ名の先頭と一致すればスコアをブースト。
+        chain: チェーン（取引先）ヒント。発注書全体で判明している場合に渡す。
+            例: 納品先列が「納品先（SEJ）」の発注書 → "セブンイレブン"。
+            個々の行から略号が読み取れなくても取引先を絞り込める。
 
     Returns dict with:
         - matched: True/False
@@ -498,6 +723,8 @@ def match_ddc(dest_name, ddc_master, max_candidates=3, sender=""):
         return {"matched": False, "name": dest_name, "candidates": []}
 
     dest_company = normalize_company(dest_name)
+    # 納品先名から読み取れるチェーン（取引先）ヒント。例: 「広島ＳＥＪ倉」→ セブンイレブン
+    chain_hint = _chain_hint(dest_name) or normalize(chain or "")
     # 発注元の正規化（"三菱食品株式会社 加食G" → "三菱食品 加食G" → 先頭4文字以上で判定）
     sender_norm = normalize_company(sender) if sender else ""
     # 卸先コードプレフィックス（"三菱食品 加食G" の "三菱食品" 部分だけ取る）
@@ -540,6 +767,13 @@ def match_ddc(dest_name, ddc_master, max_candidates=3, sender=""):
         master_name = normalize(_strip_master_suffix(str(raw_master)))
         master_company = normalize_company(_strip_master_suffix(str(raw_master)))
         base_score = _score_ddc(dest_name_clean, dest_company, master_name, master_company)
+
+        # センター名の呼び方が発注書とマスタで大きく違う場合、地名で突合する。
+        # ただしチェーン略号（SEJ等）が読み取れたときだけに限定する。
+        # 地名だけで寄せると「広島ＳＥＪ倉」がイオンの広島物流センターに当たる等の
+        # 他チェーン誤ヒットが起きるため、取引先が一致する行にしか効かせない。
+        if chain_hint and chain_hint in normalize(str(row.get("取引先名", "")) or ""):
+            base_score = max(base_score, _center_place_score(dest_company, master_company))
 
         is_sender_match = (
             sender_key and len(sender_key) >= 3
@@ -741,7 +975,12 @@ def process_fax_pdf(pdf_path, model="claude-sonnet-4-6"):
         ocr_result = ocr_fax_page(page_info["base64"], model=model)
 
         if "error" in ocr_result:
-            results.append({"page": page_info["page"], "error": ocr_result["error"], "ocr_raw": ocr_result})
+            results.append({
+                "page": page_info["page"],
+                "image_page": page_info["page"],
+                "error": ocr_result["error"],
+                "ocr_raw": ocr_result,
+            })
             continue
 
         # 年の異常値補正: OCRが製造年や賞味期限年を発注日と誤読する場合がある
@@ -751,40 +990,46 @@ def process_fax_pdf(pdf_path, model="claude-sonnet-4-6"):
             if year < 2020 or year > 2030:
                 ocr_result["delivery_date"] = "2026" + delivery_date[4:]
 
-        # Match products
-        matched_items = []
-        for ocr_item in ocr_result.get("items", []):
-            match = match_product(ocr_item, pm)
-            if match:
-                matched_items.append(match)
-            else:
-                matched_items.append({
-                    "matched": False,
-                    "ocr_name": ocr_item.get("product_name", ""),
-                    "jan": str(ocr_item.get("jan_code", "")),
-                    "quantity": int(float(str(ocr_item.get("quantity_cs") or 0).strip() or "0")),
-                })
+        # 明細行ごとに納品先が異なるフォーマット（伊藤忠食品SEJ等）は納品先単位に分割する
+        for dest_seq, sub_ocr in expand_multi_dest_ocr(ocr_result):
+            # Match products
+            matched_items = []
+            for ocr_item in sub_ocr.get("items", []):
+                match = match_product(ocr_item, pm)
+                if match:
+                    matched_items.append(match)
+                else:
+                    matched_items.append({
+                        "matched": False,
+                        "ocr_name": ocr_item.get("product_name", ""),
+                        "jan": str(ocr_item.get("jan_code", "")),
+                        "quantity": int(float(str(ocr_item.get("quantity_cs") or 0).strip() or "0")),
+                    })
 
-        # Match DDC（発注元情報もヒントとして渡す）
-        ddc_match = match_ddc(
-            ocr_result.get("delivery_dest", ""),
-            ddc,
-            sender=ocr_result.get("sender", ""),
-        )
+            # Match DDC（発注元情報もヒントとして渡す）
+            ddc_match = match_ddc(
+                sub_ocr.get("delivery_dest", ""),
+                ddc,
+                sender=sub_ocr.get("sender", ""),
+                chain=sub_ocr.get("chain_hint", ""),
+            )
 
-        # Split by output destination
-        sylvia_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "シルビア"]
-        haruna_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "ハルナ"]
-        warehouse_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "自社倉庫"]
+            # Split by output destination
+            sylvia_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "シルビア"]
+            haruna_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "ハルナ"]
+            warehouse_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "自社倉庫"]
 
-        results.append({
-            "page": page_info["page"],
-            "ocr_raw": ocr_result,
-            "matched_items": matched_items,
-            "ddc_match": ddc_match,
-            "sylvia_items": sylvia_items,
-            "haruna_items": haruna_items,
-            "warehouse_items": warehouse_items,
-        })
+            results.append({
+                "page": page_info["page"],
+                "image_page": page_info["page"],
+                "ocr_raw": sub_ocr,
+                "matched_items": matched_items,
+                "ddc_match": ddc_match,
+                "sylvia_items": sylvia_items,
+                "haruna_items": haruna_items,
+                "warehouse_items": warehouse_items,
+                "multi_dest": dest_seq > 0,
+            })
 
-    return results
+    # 「1商品1枚」形式（商品ごとにページが分かれ納品先が対になる）を納品先単位に統合
+    return merge_multi_dest_results(results)

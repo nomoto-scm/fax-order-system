@@ -38,6 +38,7 @@ APP_LAST_UPDATED = datetime.fromtimestamp(os.path.getmtime(_APP_FILE), tz=JST).s
 from ocr_module import (
     process_fax_pdf, pdf_to_images, load_ddc_master, load_product_master,
     match_ddc, match_product, load_staff, ocr_fax_page, normalize, normalize_company,
+    expand_multi_dest_ocr, merge_multi_dest_results,
     _ddc_row_to_dict,
 )
 from process_fax import generate_pdfs, results_to_excel, results_to_csv, results_to_ne_csv, results_to_coola_csv, results_to_logiless_csv, parse_paltac_csv, parse_infomart_csv, parse_smacla_csv, parse_goooods_csv, ensure_output_dir, OUTPUT_DIR
@@ -1049,6 +1050,7 @@ def api_ocr():
         if "error" in ocr_result:
             results.append({
                 "page": page_info["page"],
+                "image_page": page_info["page"],
                 "error": ocr_result["error"],
                 "ocr_raw": ocr_result,
             })
@@ -1061,47 +1063,56 @@ def api_ocr():
             if yr < 2020 or yr > 2030:
                 ocr_result["delivery_date"] = "2026" + dd[4:]
 
-        # Match products
-        matched_items = []
-        for ocr_item in ocr_result.get("items", []):
-            match = match_product(ocr_item, pm)
-            if match:
-                matched_items.append(match)
-            else:
-                try:
-                    qty = int(float(str(ocr_item.get("quantity_cs") or 0).strip() or "0"))
-                except (ValueError, TypeError):
-                    qty = 0
-                matched_items.append({
-                    "matched": False,
-                    "ocr_name": ocr_item.get("product_name", ""),
-                    "jan": str(ocr_item.get("jan_code", "")),
-                    "quantity": qty,
-                })
+        # 明細行ごとに納品先が異なるフォーマット（伊藤忠食品SEJ等）は納品先単位に分割する
+        for dest_seq, sub_ocr in expand_multi_dest_ocr(ocr_result):
+            # Match products
+            matched_items = []
+            for ocr_item in sub_ocr.get("items", []):
+                match = match_product(ocr_item, pm)
+                if match:
+                    matched_items.append(match)
+                else:
+                    try:
+                        qty = int(float(str(ocr_item.get("quantity_cs") or 0).strip() or "0"))
+                    except (ValueError, TypeError):
+                        qty = 0
+                    matched_items.append({
+                        "matched": False,
+                        "ocr_name": ocr_item.get("product_name", ""),
+                        "jan": str(ocr_item.get("jan_code", "")),
+                        "quantity": qty,
+                    })
 
-        # Match DDC
-        ddc_match = match_ddc(
-            ocr_result.get("delivery_dest", ""),
-            ddc,
-            sender=ocr_result.get("sender", ""),
-        )
+            # Match DDC
+            ddc_match = match_ddc(
+                sub_ocr.get("delivery_dest", ""),
+                ddc,
+                sender=sub_ocr.get("sender", ""),
+                chain=sub_ocr.get("chain_hint", ""),
+            )
 
-        # Split by output
-        sylvia_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "シルビア"]
-        haruna_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "ハルナ"]
+            # Split by output
+            sylvia_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "シルビア"]
+            haruna_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "ハルナ"]
 
-        # TWO受注NO自動採番
-        two_order_no = generate_two_order_no()
+            results.append({
+                "page": page_info["page"],
+                # 納品先分割で page が通し番号になるため、原本画像のページ番号を別に保持する
+                "image_page": page_info["page"],
+                "ocr_raw": sub_ocr,
+                "matched_items": matched_items,
+                "ddc_match": ddc_match,
+                "sylvia_items": sylvia_items,
+                "haruna_items": haruna_items,
+                "multi_dest": dest_seq > 0,
+            })
 
-        results.append({
-            "page": page_info["page"],
-            "ocr_raw": ocr_result,
-            "two_order_no": two_order_no,
-            "matched_items": matched_items,
-            "ddc_match": ddc_match,
-            "sylvia_items": sylvia_items,
-            "haruna_items": haruna_items,
-        })
+    # 「1商品1枚」形式（商品ごとにページが分かれ納品先が対になる）を納品先単位に統合
+    results = merge_multi_dest_results(results)
+
+    # TWO受注NO自動採番（統合後の受注単位で採番する）
+    for r in results:
+        r["two_order_no"] = generate_two_order_no()
 
     sess["results"] = results
     return jsonify({"session_id": session_id, "pages": results})
@@ -3886,7 +3897,7 @@ function renderPage(idx) {
     } else {
         // 通常: PDF→画像化したものを img で表示
         previewImg.style.display = '';
-        previewImg.src = `/api/page_image/${sessionId}/${pr.page}`;
+        previewImg.src = `/api/page_image/${sessionId}/${pr.image_page || pr.page}`;
     }
 
     const panel = document.getElementById('rightPanel');
