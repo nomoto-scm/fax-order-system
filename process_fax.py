@@ -1045,6 +1045,13 @@ def _split_address(address):
     if m:
         pref = m.group(1)
         rest = address[len(pref):]
+    else:
+        # 納品先マスタに都道府県が抜けている住所が実在する
+        # （例: 常温大阪大正センター[9188]「大阪市大正区…」）。
+        # そのままだとロジレスCSVの配送先都道府県が空になるため市名から補う。
+        # 住所本体（rest）は元のまま＝都道府県を二重に付けない。
+        from shipping_fee_calculator import extract_prefecture
+        pref = extract_prefecture(address) or ""
     addr1 = rest[:50]
     addr2 = rest[50:65] if len(rest) > 50 else ""
     addr3 = rest[65:] if len(rest) > 65 else ""
