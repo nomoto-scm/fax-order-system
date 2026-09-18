@@ -82,6 +82,66 @@ def tw(text, fs):
     return stringWidth(str(text), FONT, fs)
 
 
+def wrap_lines(text, max_w, fs):
+    """max_w に収まるように text を行へ分割して返す（1文字ずつ詰める）。"""
+    text = safe_str(text).replace('\n', ' ')
+    if not text:
+        return []
+    lines, cur = [], ""
+    for ch in text:
+        if cur and tw(cur + ch, fs) > max_w:
+            lines.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def fit_lines(text, max_w, fs, max_lines=3, shrink=True):
+    """(実フォントサイズ, 行リスト) を返す。
+
+    shrink=True なら draw_clipped と同じく先に最大3pt まで縮小を試し、
+    それでも入らなければ折り返す。shrink=False は縮小せず折り返しのみ。
+    max_lines=None で行数無制限。
+    """
+    text = safe_str(text).replace('\n', ' ')
+    if not text:
+        return fs, []
+    if tw(text, fs) <= max_w:
+        return fs, [text]
+    if shrink:
+        for step in range(1, 4):
+            nfs = fs - step
+            if nfs < 6:
+                break
+            if tw(text, nfs) <= max_w:
+                return nfs, [text]
+        nfs = max(fs - 2, 6)
+    else:
+        nfs = fs
+    lines = wrap_lines(text, max_w, nfs)
+    if max_lines:
+        lines = lines[:max_lines]
+    return nfs, lines
+
+
+def draw_wrapped(c, text, x, y, max_w, fs, lh=None, max_lines=3, shrink=True, color=None):
+    """max_w で折り返して複数行描画し、描いた行数を返す。y は1行目のベースライン。"""
+    nfs, lines = fit_lines(text, max_w, fs, max_lines, shrink)
+    if not lines:
+        return 0
+    if lh is None:
+        lh = nfs + 3
+    if color is not None:
+        c.setFillColor(color)
+    c.setFont(FONT, nfs)
+    for i, ln in enumerate(lines):
+        c.drawString(x, y - i * lh, ln)
+    return len(lines)
+
+
 def draw_clipped(c, text, x, y, max_w, fs, lh=None):
     text = safe_str(text)
     if not text:
@@ -527,7 +587,14 @@ def gen_haruna_pdf(order, ddc, staff_name="伊藤", items=None):
     # Palette info table (Haruna only)
     info_cols = [(0, 50), (50, 60), (110, 88)]
     info_hdr = ["バース予約", "パレット条件", "備考"]
-    info_h = 22
+    # 備考は長いと折り返るので、先に行数を測って枠の高さを決める
+    # （固定22ptのままだと2行目が枠外へはみ出して下の明細表に重なる）
+    _notes = safe_str(ddc.get('notes', ''))
+    _method = safe_str(ddc.get('method', ''))
+    bikou_text = " / ".join([p for p in (_notes, _method) if p])
+    BIKOU_W, BIKOU_FS, BIKOU_LH = 87 * mm, 10, 13
+    bikou_fs, bikou_lines = fit_lines(bikou_text, BIKOU_W, BIKOU_FS, max_lines=4)
+    info_h = max(22, len(bikou_lines) * BIKOU_LH + 9)
 
     c.setFillColor(HAR_LIGHT)
     c.rect(ml, y - 16, uw, 16, fill=True, stroke=False)
@@ -548,16 +615,12 @@ def gen_haruna_pdf(order, ddc, staff_name="伊藤", items=None):
     if jpr:
         palette_text = (palette + " / " if palette else "") + "JPR：%s" % jpr
     draw_clipped(c, palette_text, ml + 50 * mm + pad, ty, 59 * mm, 10)
-    # 備考: haruna_conditions.notes（固定備考）+ 納品方法
-    notes = safe_str(ddc.get('notes', ''))
-    method = safe_str(ddc.get('method', ''))
-    bikou_parts = []
-    if notes:
-        bikou_parts.append(notes)
-    if method:
-        bikou_parts.append(method)
-    if bikou_parts:
-        draw_clipped(c, " / ".join(bikou_parts), ml + 110 * mm + pad, ty, 87 * mm, 10)
+    # 備考: haruna_conditions.notes（固定備考）+ 納品方法。複数行は枠内で上下中央に置く
+    if bikou_lines:
+        block_top = ty + (len(bikou_lines) - 1) * BIKOU_LH / 2.0
+        c.setFont(FONT, bikou_fs)
+        for i, ln in enumerate(bikou_lines):
+            c.drawString(ml + 110 * mm + pad, block_top - i * BIKOU_LH, ln)
     y -= info_h + 6
 
     # Product table
@@ -632,9 +695,11 @@ def gen_haruna_pdf(order, ddc, staff_name="伊藤", items=None):
     har_remarks = safe_str(order.get('remarks', ''))
     if har_remarks:
         y -= 30
-        c.setFillColor(HAR_PRIMARY)
-        c.setFont(FONT, 14)
-        c.drawString(ml, y, "※ %s" % har_remarks)
+        # 用紙幅で折り返す（従来は1行固定で、長文が紙の外へはみ出していた）
+        REM_LH = 19
+        n = draw_wrapped(c, "※ %s" % har_remarks, ml, y, uw, 14,
+                         lh=REM_LH, max_lines=None, shrink=False, color=HAR_PRIMARY)
+        y -= max(0, n - 1) * REM_LH
         c.setFillColor(colors.black)
 
     c.showPage()
@@ -886,7 +951,7 @@ def gen_partner_pdf(
     return buf
 
 
-_PARTNER_DEFAULT_REMARKS = "別紙添付の貼り紙を外装箱に貼り付けて出荷をお願いします。"
+_PARTNER_DEFAULT_REMARKS = "貼り紙と納品書の添付は不要です"
 
 
 def gen_nomura_pdf(order, items, staff_name="伊藤"):
