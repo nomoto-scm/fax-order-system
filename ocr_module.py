@@ -5,6 +5,18 @@ import json
 import base64
 import unicodedata
 
+# ローカル開発用: .env ファイルを読み込む（依存ライブラリなし）
+# supabase_client.py と同じパターン。このモジュール単体でも
+# ANTHROPIC_API_KEY を解決できるよう、インポート順に依存させない。
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(_env_path):
+    with open(_env_path, encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
+
 # Windows terminal UTF-8 output
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     try:
