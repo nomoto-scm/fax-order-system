@@ -336,6 +336,15 @@ def move_to_processed(pdf_path: str, mode: str = "new") -> str:
     return _move_pdf_with_meta_local(pdf_path, processed_folder)
 
 
+def is_ocr_total_failure(results) -> bool:
+    """全ページが OCR エラーなら True（＝エラーフォルダへ退避すべき）。
+
+    OCR は例外ではなく {"error": ...} を返すため、API障害などで全ページ
+    失敗しても解析成功として扱われ、処理済みへ流れてしまっていた。
+    """
+    return bool(results) and all("error" in r for r in results)
+
+
 def move_to_error(pdf_path: str) -> str:
     """エラーフォルダへ移動。ローカル/API 両対応。"""
     if is_api_mode():
@@ -884,6 +893,20 @@ def run_import(
                 print(f"  → エラーフォルダへ移動: {os.path.basename(moved)}")
                 moved_to_error_count += 1
             files_log.append({"file": fname, "status": "parse_error", "error": str(e)})
+            continue
+
+        # OCRが全ページ失敗したファイルはエラーフォルダへ退避する。
+        # （従来は「エラーでないページ数 > 0」を条件にしていたため、全滅時に
+        #   判定が素通りして処理済みへ流れ、障害に気づけなかった）
+        if is_ocr_total_failure(results):
+            msgs = sorted({str(r.get("error"))[:120] for r in results})
+            print(f"\n❌ OCR全ページ失敗: {fname}: {' / '.join(msgs)}")
+            if mode == "new":
+                moved = move_to_error(file_path)
+                print(f"  → エラーフォルダへ移動: {os.path.basename(moved)}")
+                moved_to_error_count += 1
+            files_log.append({"file": fname, "status": "ocr_all_errors",
+                              "error": " / ".join(msgs)})
             continue
 
         # Phase 4 (D1): drive_processor では発注書PDF生成しない。
