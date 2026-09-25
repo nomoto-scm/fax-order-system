@@ -865,6 +865,21 @@ def run_import(
         else:
             file_source_channel = source_channel  # PDF はデフォルトで efax
 
+        # PALTAC は1受注につき2通届く。
+        #   *_HAC_*.csv … 真の受注。通常どおり取り込む
+        #   *_SIR_*.csv … TWOが受注を確定した後に届く「確定済み」の自動通知
+        # SIR は元の受注と発注番号・納品日・明細が完全に一致するため、取り込むと
+        # 確定画面に再送そっくりの伝票が並び、確定すると二重受注になる。
+        # （2026-09-25 RDC横浜 44581450 が SIR。SCM-306 で「再送＝二重出荷の恐れ」として上がった）
+        # 受注ではないのでエラーではなく、そのまま処理済みへ送る。
+        if ext == ".csv" and "_SIR_" in fname.upper():
+            print(f"\n⏭️  PALTAC 確定済み通知（SIR）のため取込対象外: {fname}")
+            if mode == "new":
+                moved = move_to_processed(file_path, mode=mode)
+                print(f"  → 処理済みへ移動: {os.path.basename(moved)}")
+            files_log.append({"file": fname, "status": "paltac_sir_skipped"})
+            continue
+
         # 解析処理: PDF→OCR / CSV→parse_paltac_csv
         try:
             if ext == ".pdf":
