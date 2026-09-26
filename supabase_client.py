@@ -500,6 +500,22 @@ def load_shipping_rules_from_supabase() -> list[dict] | None:
     return _supabase_get("shipping_rules", "select=*&order=priority.asc")
 
 
+def fetch_confirmed_expiry_sources(limit: int = 1000) -> list[dict] | None:
+    """賞味期限照合用に、確定済み受注のヘッダ＋確定スナップショットを取得する。
+
+    賞味期限は fax_order_items_scm に列が無く、confirmation_history（JSONB）内の
+    snapshot.pages[].items[].expiry_date にのみ保存されているため、ヘッダごと取得して
+    expiry_guard.history_rows_from_orders で平坦化する。失敗時は None。
+    """
+    return _supabase_get(
+        "fax_orders_scm",
+        "status=eq.confirmed"
+        "&select=id,confirmed_at,partner_name,delivery_location_code,delivery_location_name,"
+        "warehouse,confirmation_history"
+        f"&order=confirmed_at.desc&limit={limit}",
+    )
+
+
 def load_shipping_expiry_rules_from_supabase() -> dict | None:
     """Supabaseから出荷賞味期限ルールを取得する。
     Returns: {jan: min_remaining_days} の dict、失敗時は None

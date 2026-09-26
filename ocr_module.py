@@ -35,6 +35,8 @@ import anthropic
 import pandas as pd
 from difflib import SequenceMatcher
 
+from direction_guard import build_direction_alert
+
 
 def normalize(s):
     """NFKC normalization: convert full-width chars to half-width (e.g. ＤＤＣ→DDC)"""
@@ -711,6 +713,52 @@ def _score_ddc(dest_name_clean, dest_company, master_name, master_company):
     return best
 
 
+def _apply_direction_guard(result, dest_name, ddc_master):
+    """（上り）（下り）を含むマッチを無条件で要確認化し、対の納品先を候補に付与する。
+
+    OCRの方面誤読は名称類似度ではスコア差が出ず（長い名称の1文字違い）、
+    誤読した側のマスタ名に「完全一致」して自動OKになるため、
+    マッチ経路（完全一致含む）によらず確定前に必ず人の目を通す。
+    2026-06請求・2026-08受注のネクスコ上り/下り取り違えの再発防止。
+    """
+    if not result.get("matched"):
+        return result
+
+    import re as _re
+
+    def _strip_suffix(s):
+        t = _re.sub(r'\s*\[[^\]]*\]\s*/\s*.*$', '', s)
+        return _re.sub(r'\s*\[[^\]]*\]\s*$', '', t).strip()
+
+    def _safe(v):
+        s = str(v).strip() if v is not None else ""
+        return "" if s.lower() in ("nan", "none", "null") else s
+
+    rows = []
+    for _, row in ddc_master.iterrows():
+        rows.append({
+            "name": _strip_suffix(_safe(row.get("納品先名", ""))),
+            "nohinsaki_code": _safe(row.get("納品先コード", "")),
+            "address": _safe(row.get("住所", "")),
+            "tel": _safe(row.get("電話番号", "")),
+        })
+
+    alert = build_direction_alert(dest_name, result.get("name", ""), rows)
+    if alert is None:
+        return result
+
+    result["low_confidence"] = True
+    result["direction_alert"] = alert
+    # 対になる納品先を候補に必ず並べる（住所・スコア併記の既存候補UIに乗せる）
+    cands = result.get("candidates") or []
+    existing = {c.get("name") for c in cands}
+    for p in alert["pairs"]:
+        if p["name"] not in existing:
+            cands.append({"name": p["name"], "score": 0.0, "address": p["address"]})
+    result["candidates"] = cands
+    return result
+
+
 def match_ddc(dest_name, ddc_master, max_candidates=3, sender="", chain=""):
     """Match delivery destination name to DDC master.
 
@@ -750,7 +798,7 @@ def match_ddc(dest_name, ddc_master, max_candidates=3, sender="", chain=""):
         result["match_score"] = 1.0
         result["low_confidence"] = False
         result["candidates"] = [{"name": result["name"], "score": 1.0}]
-        return result
+        return _apply_direction_guard(result, dest_name, ddc_master)
 
     # 1b. Exact match (会社名正規化版)
     comp_master = ddc_master["納品先名"].apply(normalize_company)
@@ -760,7 +808,7 @@ def match_ddc(dest_name, ddc_master, max_candidates=3, sender="", chain=""):
         result["match_score"] = 1.0
         result["low_confidence"] = False
         result["candidates"] = [{"name": result["name"], "score": 1.0}]
-        return result
+        return _apply_direction_guard(result, dest_name, ddc_master)
 
     # 2. Fuzzy scoring → 上位N件を候補として返す
     DDC_FUZZY_THRESHOLD = 0.35  # 候補収集は広めに（採用判定は0.7以上）
@@ -880,7 +928,7 @@ def match_ddc(dest_name, ddc_master, max_candidates=3, sender="", chain=""):
         # 0.90未満は低信頼度（候補確認推奨）
         result["low_confidence"] = best_score < 0.92
         result["candidates"] = candidates
-        return result
+        return _apply_direction_guard(result, dest_name, ddc_master)
 
     # 未マッチ（候補は残す）
     return {"matched": False, "name": dest_name, "candidates": candidates}
