@@ -2004,7 +2004,7 @@ function renderTable() {
       <td>${o.warehouse || '-'}</td>
       <td>${total}</td>
       <td>${statusBadge} ${flags}</td>
-      <td style="font-size:11px;color:#888">${(o.created_at || '').substring(0, 16).replace('T', ' ')}</td>
+      <td style="font-size:11px;color:#888">${formatJst(o.created_at)}</td>
       <td>${delBtn}</td>
     </tr>`;
   }).join('');
