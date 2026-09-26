@@ -4,7 +4,7 @@ from pypdf import PdfReader
 
 from pdf_generator import gen_haruna_pdf, fit_lines, wrap_lines, tw
 
-BIKOU_W, BIKOU_FS = 87 * mm, 10
+BIKOU_W, BIKOU_FS = 111 * mm, 10
 LONG_NOTE = "木パレット禁止／ビールパレット可。予約システムあり（日本アクセスの専用システム）"
 LONG_REMARK = ("賞味期限 2027.02.16以降。発注伝票No:01377283を納品書および請求書へ記載すること。"
                "賞味期限をワンバッチでお願いします。数量及び着日の変更時のみ必ずファックス返信願います。")
@@ -20,7 +20,9 @@ def build(notes, remarks):
            "tel": "054-655-2520", "fax": "", "time": "午前中", "berse": "有り",
            "palette": "JPRパレット名義変更", "jpr": "15557", "method": "", "notes": notes}
     buf = gen_haruna_pdf(order, ddc, "伊藤", items=ITEMS)
-    return "\n".join(p.extract_text() or "" for p in PdfReader(buf).pages).replace(" ", "")
+    t = "\n".join(p.extract_text() or "" for p in PdfReader(buf).pages)
+    # 折り返しで語が行をまたぐため、空白と改行を除いて検査する
+    return t.replace(" ", "").replace("\n", "")
 
 
 ok = True

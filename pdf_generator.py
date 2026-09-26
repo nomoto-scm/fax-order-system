@@ -585,15 +585,18 @@ def gen_haruna_pdf(order, ddc, staff_name="伊藤", items=None):
     y -= dest_row_h + 4
 
     # Palette info table (Haruna only)
-    info_cols = [(0, 50), (50, 60), (110, 88)]
+    # 用紙の使える幅 uw=273mm を使い切る（従来は198mmまでで右に75mm余っていた）
+    info_cols = [(0, 66), (66, 95), (161, 112)]
     info_hdr = ["バース予約", "パレット条件", "備考"]
     # 備考は長いと折り返るので、先に行数を測って枠の高さを決める
     # （固定22ptのままだと2行目が枠外へはみ出して下の明細表に重なる）
     _notes = safe_str(ddc.get('notes', ''))
     _method = safe_str(ddc.get('method', ''))
     bikou_text = " / ".join([p for p in (_notes, _method) if p])
-    BIKOU_W, BIKOU_FS, BIKOU_LH = 87 * mm, 10, 13
-    bikou_fs, bikou_lines = fit_lines(bikou_text, BIKOU_W, BIKOU_FS, max_lines=4)
+    BIKOU_W, BIKOU_FS, BIKOU_LH = 111 * mm, 10, 13
+    # 欄を広げたので縮小はせず、10pt のまま折り返す（小さくて読めない対策）
+    bikou_fs, bikou_lines = fit_lines(bikou_text, BIKOU_W, BIKOU_FS,
+                                      max_lines=4, shrink=False)
     info_h = max(22, len(bikou_lines) * BIKOU_LH + 9)
 
     c.setFillColor(HAR_LIGHT)
@@ -607,20 +610,20 @@ def gen_haruna_pdf(order, ddc, staff_name="伊藤", items=None):
 
     draw_table_row(c, ml, y, info_cols, uw, info_h)
     ty = cell_mid_y(y, info_h, 10)
-    draw_clipped(c, safe_str(ddc.get('berse', '無')), ml + pad, ty, 49 * mm, 10)
+    draw_clipped(c, safe_str(ddc.get('berse', '無')), ml + pad, ty, 65 * mm, 10)
     # パレット条件: 値 + JPRコード（あれば併記）
     palette = safe_str(ddc.get('palette', ''))
     jpr = safe_str(ddc.get('jpr', ''))
     palette_text = palette
     if jpr:
         palette_text = (palette + " / " if palette else "") + "JPR：%s" % jpr
-    draw_clipped(c, palette_text, ml + 50 * mm + pad, ty, 59 * mm, 10)
+    draw_clipped(c, palette_text, ml + 66 * mm + pad, ty, 94 * mm, 10)
     # 備考: haruna_conditions.notes（固定備考）+ 納品方法。複数行は枠内で上下中央に置く
     if bikou_lines:
         block_top = ty + (len(bikou_lines) - 1) * BIKOU_LH / 2.0
         c.setFont(FONT, bikou_fs)
         for i, ln in enumerate(bikou_lines):
-            c.drawString(ml + 110 * mm + pad, block_top - i * BIKOU_LH, ln)
+            c.drawString(ml + 161 * mm + pad, block_top - i * BIKOU_LH, ln)
     y -= info_h + 6
 
     # Product table
