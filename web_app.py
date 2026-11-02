@@ -96,6 +96,40 @@ def get_product_master():
     return _product_master_df
 
 
+def _build_pm_indexes(pm_df):
+    """商品マスタをJAN・商品コードの両方で引けるよう索引化する。
+
+    JAL/Infomart経由の受注など、取込元がJANを持たず商品コードのみを渡してくる
+    ケースがあるため、出力先（シルビア/ハルナ振り分け等）の解決をJAN索引だけに
+    依存すると output_dest が空のまま埋まらず、発注書が作られない事故になる。
+    """
+    pm_jan_index = {}
+    pm_code_index = {}
+    if pm_df is not None:
+        if "JANコード" in pm_df.columns:
+            for _, prow in pm_df.iterrows():
+                j = str(prow.get("JANコード") or "").strip()
+                if j:
+                    pm_jan_index[j] = prow
+        if "商品コード" in pm_df.columns:
+            for _, prow in pm_df.iterrows():
+                c = str(prow.get("商品コード") or "").strip()
+                if c:
+                    pm_code_index[c] = prow
+    return pm_jan_index, pm_code_index
+
+
+def _pm_lookup_row(pm_jan_index, pm_code_index, jan="", code=""):
+    """JANで引けなければ商品コードでフォールバックして商品マスタ行を返す。"""
+    jan = (jan or "").strip()
+    if jan and jan in pm_jan_index:
+        return pm_jan_index[jan]
+    code = (code or "").strip()
+    if code and code in pm_code_index:
+        return pm_code_index[code]
+    return None
+
+
 def get_ddc_list():
     """Return DDC master as list of dicts for JSON API"""
     global _ddc_list_cache
@@ -412,12 +446,7 @@ def api_bulk_csv_export():
     ddc_df = get_ddc_master()
 
     # 各 order_id を fetch して内部 results 形式に変換
-    pm_jan_index = {}
-    if pm_df is not None and "JANコード" in pm_df.columns:
-        for _, prow in pm_df.iterrows():
-            j = str(prow.get("JANコード") or "").strip()
-            if j:
-                pm_jan_index[j] = prow
+    pm_jan_index, pm_code_index = _build_pm_indexes(pm_df)
 
     all_results = []
     skipped = 0
@@ -451,7 +480,7 @@ def api_bulk_csv_export():
             # snapshot 優先パス (確定済み受注で確実にこちらに入る)
             for snap_it in snap_items_all:
                 jan = str(snap_it.get("jan") or "").strip()
-                prow = pm_jan_index.get(jan) if jan else None
+                prow = _pm_lookup_row(pm_jan_index, pm_code_index, jan, snap_it.get("code"))
                 # 出力先・CS単価等は商品マスタから補完。snapshot に値があればそちらを尊重
                 output_dest = (snap_it.get("output_dest") or
                                (str(prow.get("出力先") or "").strip() if prow is not None else ""))
@@ -486,7 +515,9 @@ def api_bulk_csv_export():
             # フォールバック: snapshot 無し（draft のまま等）— fax_order_items_scm を使う
             for it in items:
                 jan = str(it.get("jan_code") or "").strip()
-                prow = pm_jan_index.get(jan)
+                prow = _pm_lookup_row(pm_jan_index, pm_code_index, jan, it.get("product_code"))
+                if not jan and prow is not None:
+                    jan = str(prow.get("JANコード") or "").strip()
                 output_dest = str(prow.get("出力先") or "").strip() if prow is not None else ""
                 case_qty = int(prow.get("入数") or 0) if prow is not None else 0
                 cs_price = float(prow.get("CS単価") or 0) if prow is not None else float(it.get("unit_price") or 0)
@@ -696,17 +727,16 @@ def api_load_draft():
 
     # 商品マスタから出力先・1袋単価等を引き当て
     pm_df = get_product_master()
-    pm_jan_index = {}
-    if pm_df is not None and "JANコード" in pm_df.columns:
-        for _, prow in pm_df.iterrows():
-            j = str(prow.get("JANコード") or "").strip()
-            if j:
-                pm_jan_index[j] = prow
+    pm_jan_index, pm_code_index = _build_pm_indexes(pm_df)
 
     matched_items = []
     for it in items:
         jan = str(it.get("jan_code") or "").strip()
-        prow = pm_jan_index.get(jan)
+        prow = _pm_lookup_row(pm_jan_index, pm_code_index, jan, it.get("product_code"))
+        if not jan and prow is not None:
+            # 商品コード一致でJANが埋められるなら、送料計算(jans_lot_break)等の
+            # JANキー処理のために補完しておく
+            jan = str(prow.get("JANコード") or "").strip()
         output_dest = str(prow.get("出力先") or "").strip() if prow is not None else ""
         case_qty = int(prow.get("入数") or 0) if prow is not None else 0
         bag_unit_price = float(prow.get("1袋単価") or 0) if prow is not None else 0.0
