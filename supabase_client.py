@@ -461,13 +461,18 @@ TEMP_OUTPUT_DEST_OVERRIDES = [
 
 
 def _apply_temp_output_dest_overrides(df: pd.DataFrame) -> pd.DataFrame:
-    """TEMP_OUTPUT_DEST_OVERRIDES のうち、今日が期間内のものを商品マスタへ反映する。"""
-    from datetime import date
+    """TEMP_OUTPUT_DEST_OVERRIDES のうち、今日が期間内のものを商品マスタへ反映する。
+
+    「今日」は JST で判定する。Render は UTC 稼働のため、date.today()（ローカル日付）
+    だと JST の日付より最大9時間遅れてしまい、開始日・終了日の境界がズレる。
+    """
+    from datetime import datetime, timezone, timedelta
 
     if df is None or len(df) == 0 or "商品コード" not in df.columns:
         return df
 
-    today = date.today().isoformat()
+    JST = timezone(timedelta(hours=9))
+    today = datetime.now(JST).date().isoformat()
     for product_code, new_dest, start, end, note in TEMP_OUTPUT_DEST_OVERRIDES:
         if not (start <= today <= end):
             continue
