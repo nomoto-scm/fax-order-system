@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ocr_module import process_fax_pdf, load_staff
 from pdf_generator import (
     gen_sylvia_pdf, gen_haruna_pdf, gen_nomura_pdf, gen_emsink_pdf, gen_powbar_pdf,
+    haruna_pdf_filename,
     gen_daylily_pdf,
 )
 
@@ -1044,6 +1045,13 @@ def _split_address(address):
     if m:
         pref = m.group(1)
         rest = address[len(pref):]
+    else:
+        # 納品先マスタに都道府県が抜けている住所が実在する
+        # （例: 常温大阪大正センター[9188]「大阪市大正区…」）。
+        # そのままだとロジレスCSVの配送先都道府県が空になるため市名から補う。
+        # 住所本体（rest）は元のまま＝都道府県を二重に付けない。
+        from shipping_fee_calculator import extract_prefecture
+        pref = extract_prefecture(address) or ""
     addr1 = rest[:50]
     addr2 = rest[50:65] if len(rest) > 50 else ""
     addr3 = rest[65:] if len(rest) > 65 else ""
@@ -1860,8 +1868,10 @@ def generate_pdfs(results, pdf_name, staff_name="伊藤"):
                 "method": ddc.get("method", ""),
                 "notes": ddc.get("notes", ""),
             }
-            pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name)
-            out_name = f"ハルナ_{base_name}_p{page_num}.pdf"
+            pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name, items=haruna_items)
+            out_name = haruna_pdf_filename(
+                dest_name, ocr.get("delivery_date", ""), order_no, page_num
+            )
             out_path = os.path.join(OUTPUT_DIR, out_name)
             _archive_existing_file(out_path)
             with open(out_path, "wb") as f:

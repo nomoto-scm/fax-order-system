@@ -18,6 +18,18 @@ Drive ID が必要。`DRIVE_FOLDER_NEW_ID` 等の環境変数で指定する。
 import os
 import io
 import json
+
+# ローカル開発用: .env ファイルを読み込む（依存ライブラリなし）
+# supabase_client.py と同じパターン。DRIVE_MODE が未読込のまま
+# local モードへ黙って落ちるのを防ぐため、インポート順に依存させない。
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(_env_path):
+    with open(_env_path, encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
 import shutil
 from typing import List, Optional, Tuple
 

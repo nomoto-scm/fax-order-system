@@ -38,6 +38,7 @@ APP_LAST_UPDATED = datetime.fromtimestamp(os.path.getmtime(_APP_FILE), tz=JST).s
 from ocr_module import (
     process_fax_pdf, pdf_to_images, load_ddc_master, load_product_master,
     match_ddc, match_product, load_staff, ocr_fax_page, normalize, normalize_company,
+    expand_multi_dest_ocr, merge_multi_dest_results,
     _ddc_row_to_dict,
 )
 from process_fax import generate_pdfs, results_to_excel, results_to_csv, results_to_ne_csv, results_to_coola_csv, results_to_logiless_csv, parse_paltac_csv, parse_infomart_csv, parse_smacla_csv, parse_goooods_csv, ensure_output_dir, OUTPUT_DIR
@@ -119,6 +120,42 @@ def get_ddc_list():
     return _ddc_list_cache
 
 
+# 賞味期限照合の実績キャッシュ（確定済みスナップショットの平坦化結果）。
+# 確定直後の取り込み漏れを短くするため TTL は短め。
+_expiry_history_cache = {"rows": None, "at": 0.0}
+_expiry_rules_cache = {"rules": None, "at": 0.0}
+EXPIRY_CACHE_TTL_SEC = 60
+
+
+def get_expiry_history_rows():
+    import time as _time
+    now = _time.time()
+    if _expiry_history_cache["rows"] is not None and now - _expiry_history_cache["at"] < EXPIRY_CACHE_TTL_SEC:
+        return _expiry_history_cache["rows"]
+    from supabase_client import fetch_confirmed_expiry_sources
+    from expiry_guard import history_rows_from_orders
+    orders = fetch_confirmed_expiry_sources()
+    if orders is None:
+        # 取得失敗時は古いキャッシュで継続（無ければ空=照合スキップ）
+        return _expiry_history_cache["rows"] or []
+    rows = history_rows_from_orders(orders)
+    _expiry_history_cache.update(rows=rows, at=now)
+    return rows
+
+
+def get_shipping_expiry_rules():
+    import time as _time
+    now = _time.time()
+    if _expiry_rules_cache["rules"] is not None and now - _expiry_rules_cache["at"] < EXPIRY_CACHE_TTL_SEC * 10:
+        return _expiry_rules_cache["rules"]
+    from supabase_client import load_shipping_expiry_rules_from_supabase
+    rules = load_shipping_expiry_rules_from_supabase()
+    if rules is None:
+        return _expiry_rules_cache["rules"] or {}
+    _expiry_rules_cache.update(rules=rules, at=now)
+    return rules
+
+
 # ─── API Endpoints ───
 
 
@@ -168,6 +205,28 @@ def api_confirmed_orders():
     try:
         rows = fetch_confirmed_orders(limit=200, source_channel=source, days=days)
         return jsonify({"orders": rows, "count": len(rows)})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/confirmed_orders/search")
+def api_confirmed_orders_search():
+    """確定済み受注を全期間から検索してJSONで返す（days制限なし・サーバー側フィルタ）。"""
+    from supabase_client import search_confirmed_orders
+    partner = (request.args.get("q_partner") or "").strip() or None
+    dest = (request.args.get("q_dest") or "").strip() or None
+    delivery_date = (request.args.get("q_date") or "").strip() or None
+    slip = (request.args.get("q_slip") or "").strip() or None
+    source = request.args.get("source") or None
+    if not any([partner, dest, delivery_date, slip]):
+        return jsonify({"error": "検索条件を1つ以上入力してください", "orders": [], "count": 0}), 400
+    try:
+        rows = search_confirmed_orders(partner=partner, dest=dest,
+                                       delivery_date=delivery_date, slip=slip,
+                                       source_channel=source, limit=1000)
+        return jsonify({"orders": rows, "count": len(rows), "search": True})
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -290,6 +349,45 @@ def api_pending_order_delete(order_id):
 @app.route("/api/ddc_list")
 def api_ddc_list():
     return _no_cache_json(get_ddc_list())
+
+
+@app.route("/api/check_expiry", methods=["POST"])
+def api_check_expiry():
+    """賞味期限の逆転・残存日数不足を確定済みスナップショットと照合する。
+
+    Body: {"exclude_order_id": draft_id|null,
+           "pages": [{"page", "partner_name", "delivery_location_code", "delivery_location_name",
+                      "delivery_date", "items": [{"index", "jan", "master_name", "expiry_date"}]}]}
+    Returns: {"pages": [{"page", "alerts": [...]}], "history_rows": N}
+    照合はDB実績基準のため、出荷元倉庫や入力経路（手入力/メモリ自動適用）に依存しない。
+    """
+    from expiry_guard import find_reference_expiry, evaluate_item
+    data = request.get_json(silent=True) or {}
+    exclude = data.get("exclude_order_id") or None
+    rows = get_expiry_history_rows()
+    rules = get_shipping_expiry_rules()
+    out = []
+    for p in data.get("pages") or []:
+        page_alerts = []
+        for it in p.get("items") or []:
+            jan = str(it.get("jan") or "")
+            exp = it.get("expiry_date")
+            if not jan or not exp:
+                continue
+            ref = find_reference_expiry(
+                rows, jan,
+                delivery_location_code=p.get("delivery_location_code") or "",
+                delivery_location_name=p.get("delivery_location_name") or "",
+                partner_name=p.get("partner_name") or "",
+                exclude_order_id=exclude,
+            )
+            for a in evaluate_item(exp, ref, p.get("delivery_date"), rules.get(jan)):
+                a["item_index"] = it.get("index")
+                a["jan"] = jan
+                a["product_name"] = it.get("master_name") or ""
+                page_alerts.append(a)
+        out.append({"page": p.get("page"), "alerts": page_alerts})
+    return jsonify({"pages": out, "history_rows": len(rows)})
 
 
 @app.route("/api/bulk_csv_export", methods=["POST"])
@@ -1027,6 +1125,7 @@ def api_ocr():
         if "error" in ocr_result:
             results.append({
                 "page": page_info["page"],
+                "image_page": page_info["page"],
                 "error": ocr_result["error"],
                 "ocr_raw": ocr_result,
             })
@@ -1039,47 +1138,56 @@ def api_ocr():
             if yr < 2020 or yr > 2030:
                 ocr_result["delivery_date"] = "2026" + dd[4:]
 
-        # Match products
-        matched_items = []
-        for ocr_item in ocr_result.get("items", []):
-            match = match_product(ocr_item, pm)
-            if match:
-                matched_items.append(match)
-            else:
-                try:
-                    qty = int(float(str(ocr_item.get("quantity_cs") or 0).strip() or "0"))
-                except (ValueError, TypeError):
-                    qty = 0
-                matched_items.append({
-                    "matched": False,
-                    "ocr_name": ocr_item.get("product_name", ""),
-                    "jan": str(ocr_item.get("jan_code", "")),
-                    "quantity": qty,
-                })
+        # 明細行ごとに納品先が異なるフォーマット（伊藤忠食品SEJ等）は納品先単位に分割する
+        for dest_seq, sub_ocr in expand_multi_dest_ocr(ocr_result):
+            # Match products
+            matched_items = []
+            for ocr_item in sub_ocr.get("items", []):
+                match = match_product(ocr_item, pm)
+                if match:
+                    matched_items.append(match)
+                else:
+                    try:
+                        qty = int(float(str(ocr_item.get("quantity_cs") or 0).strip() or "0"))
+                    except (ValueError, TypeError):
+                        qty = 0
+                    matched_items.append({
+                        "matched": False,
+                        "ocr_name": ocr_item.get("product_name", ""),
+                        "jan": str(ocr_item.get("jan_code", "")),
+                        "quantity": qty,
+                    })
 
-        # Match DDC
-        ddc_match = match_ddc(
-            ocr_result.get("delivery_dest", ""),
-            ddc,
-            sender=ocr_result.get("sender", ""),
-        )
+            # Match DDC
+            ddc_match = match_ddc(
+                sub_ocr.get("delivery_dest", ""),
+                ddc,
+                sender=sub_ocr.get("sender", ""),
+                chain=sub_ocr.get("chain_hint", ""),
+            )
 
-        # Split by output
-        sylvia_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "シルビア"]
-        haruna_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "ハルナ"]
+            # Split by output
+            sylvia_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "シルビア"]
+            haruna_items = [i for i in matched_items if i.get("matched") and i.get("output_dest") == "ハルナ"]
 
-        # TWO受注NO自動採番
-        two_order_no = generate_two_order_no()
+            results.append({
+                "page": page_info["page"],
+                # 納品先分割で page が通し番号になるため、原本画像のページ番号を別に保持する
+                "image_page": page_info["page"],
+                "ocr_raw": sub_ocr,
+                "matched_items": matched_items,
+                "ddc_match": ddc_match,
+                "sylvia_items": sylvia_items,
+                "haruna_items": haruna_items,
+                "multi_dest": dest_seq > 0,
+            })
 
-        results.append({
-            "page": page_info["page"],
-            "ocr_raw": ocr_result,
-            "two_order_no": two_order_no,
-            "matched_items": matched_items,
-            "ddc_match": ddc_match,
-            "sylvia_items": sylvia_items,
-            "haruna_items": haruna_items,
-        })
+    # 「1商品1枚」形式（商品ごとにページが分かれ納品先が対になる）を納品先単位に統合
+    results = merge_multi_dest_results(results)
+
+    # TWO受注NO自動採番（統合後の受注単位で採番する）
+    for r in results:
+        r["two_order_no"] = generate_two_order_no()
 
     sess["results"] = results
     return jsonify({"session_id": session_id, "pages": results})
@@ -1701,6 +1809,8 @@ def api_reload_master():
     _product_master_df = None
     _ddc_list_cache = None
     process_fax._oroshisaki_cache = None
+    _expiry_history_cache["rows"] = None
+    _expiry_rules_cache["rules"] = None
     # 再読込
     ddc_count = len(get_ddc_master())
     prod_count = len(get_product_master())
@@ -1971,7 +2081,7 @@ function renderTable() {
       <td>${o.warehouse || '-'}</td>
       <td>${total}</td>
       <td>${statusBadge} ${flags}</td>
-      <td style="font-size:11px;color:#888">${(o.created_at || '').substring(0, 16).replace('T', ' ')}</td>
+      <td style="font-size:11px;color:#888">${formatJst(o.created_at)}</td>
       <td>${delBtn}</td>
     </tr>`;
   }).join('');
@@ -2414,6 +2524,14 @@ CONFIRMED_ORDERS_TEMPLATE = r"""<!DOCTYPE html>
             style="padding:5px 12px; border:1px solid #ccc; background:#f8f8f8; border-radius:4px; cursor:pointer; font-size:12px;">
       クリア
     </button>
+    <button onclick="searchAllHistory()"
+            style="padding:5px 12px; border:1px solid #6A1B9A; background:#F3E5F5; color:#6A1B9A; border-radius:4px; cursor:pointer; font-size:12px; font-weight:600;">
+      🌐 全期間から検索
+    </button>
+    <button onclick="backToRecent()" id="backToRecentBtn"
+            style="display:none; padding:5px 12px; border:1px solid #ccc; background:#f8f8f8; border-radius:4px; cursor:pointer; font-size:12px;">
+      ← 最新に戻る
+    </button>
   </div>
 
   <div id="content">
@@ -2459,6 +2577,9 @@ let filteredOrders = [];  // 検索フィルタ適用後（描画用）
 
 async function loadOrders(source, isReload) {
   if (source !== undefined && source !== null) currentSource = source;
+  // 全期間検索モードを解除（通常表示に戻す）
+  const _backBtn = document.getElementById('backToRecentBtn');
+  if (_backBtn) _backBtn.style.display = 'none';
 
   document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
   const btnId = currentSource === '' ? 'btn-all' : `btn-${currentSource}`;
@@ -2471,7 +2592,7 @@ async function loadOrders(source, isReload) {
     const days = document.getElementById('daysSelect').value;
     const params = new URLSearchParams();
     if (currentSource) params.set('source', currentSource);
-    if (days) params.set('days', days);
+    params.set('days', days);  // "" のときは全期間（サーバー側で days=None 扱い＝全件）
     const url = '/api/confirmed_orders' + (params.toString() ? '?' + params.toString() : '');
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2526,6 +2647,45 @@ function clearFilters() {
   document.getElementById('filterDeliveryDate').value = '';
   document.getElementById('filterSlip').value = '';
   applyFilter();
+}
+
+// 全期間からサーバー側検索（確定済み・days制限なし・最新200件の枠を超えて探せる）
+async function searchAllHistory() {
+  const partner = (document.getElementById('filterPartner').value || '').trim();
+  const dest = (document.getElementById('filterDest').value || '').trim();
+  const date = (document.getElementById('filterDeliveryDate').value || '').trim();
+  const slip = (document.getElementById('filterSlip').value || '').trim();
+  if (!partner && !dest && !date && !slip) {
+    alert('全期間から検索するには、取引先・納品先・納品日・伝票No のいずれかを入力してください。');
+    return;
+  }
+  document.getElementById('content').innerHTML = '<div class="loading">全期間から検索中...</div>';
+  try {
+    const params = new URLSearchParams();
+    if (currentSource) params.set('source', currentSource);
+    if (partner) params.set('q_partner', partner);
+    if (dest) params.set('q_dest', dest);
+    if (date) params.set('q_date', date);
+    if (slip) params.set('q_slip', slip);
+    const res = await fetch('/api/confirmed_orders/search?' + params.toString());
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
+    currentOrders = data.orders || [];
+    filteredOrders = currentOrders;
+    const backBtn = document.getElementById('backToRecentBtn');
+    if (backBtn) backBtn.style.display = '';
+    renderTable();
+    const n = currentOrders.length;
+    document.getElementById('summary').textContent =
+      '全期間検索: ' + n + '件' + (n >= 1000 ? '（上限1000件・条件を絞ってください）' : '');
+  } catch (err) {
+    document.getElementById('content').innerHTML = '<div class="empty">検索失敗: ' + err.message + '</div>';
+  }
+}
+
+// 通常表示（最新）に戻す
+function backToRecent() {
+  loadOrders(currentSource, true);
 }
 
 function renderTable() {
@@ -3608,6 +3768,195 @@ function refreshLotAlertBanner(pageIdx) {
     }
 }
 
+// ─── 方面（上り/下り）アラート ───
+// ネクスコ系は同一店名で（上り）（下り）が対（別納品先コード・別請求先）。
+// OCRの方面誤読は名称類似度でスコア差が出ないため、方面付きマッチは
+// マッチ経路によらず必ず要確認にし、対をコード/住所/TEL付きで並べて選ばせる。
+const DIRECTION_RE = /[（(]\s*(上り|下り)\s*[）)]|(上り|下り)/;
+function getDirection(name) {
+    const m = DIRECTION_RE.exec(name || '');
+    return m ? (m[1] || m[2]) : null;
+}
+function directionBase(name) {
+    return (name || '').replace(/[（(]\s*(上り|下り)\s*[）)]/g, '')
+                       .replace(/(上り|下り)/g, '')
+                       .replace(/\s+/g, '');
+}
+function getDirectionPairs(name) {
+    const dir = getDirection(name);
+    if (!dir) return [];
+    const base = directionBase(name);
+    return (ddcMaster || []).filter(d => {
+        const dd = getDirection(d.name);
+        return dd && dd !== dir && directionBase(d.name) === base;
+    });
+}
+function highlightDirection(name) {
+    return (name || '').replace(/([（(]\s*(?:上り|下り)\s*[）)])/g,
+        '<span style="color:#b71c1c;font-weight:bold;font-size:17px;background:#FFF59D;padding:0 3px;border-radius:3px">$1</span>');
+}
+function renderDirectionAlertBannerHtml(pageIdx) {
+    const pr = pageResults[pageIdx];
+    if (!pr || pr.error || !pr.ddc_match || !pr.ddc_match.matched) return '';
+    const name = pr.ddc_match.name || '';
+    const dir = getDirection(name);
+    if (!dir) return '';
+    if (pr._directionConfirmed === name) return '';
+    const ocrDest = (pr.ocr_raw && pr.ocr_raw.delivery_dest) || '';
+    const ocrDir = getDirection(ocrDest);
+    const mismatch = !!(ocrDir && ocrDir !== dir);
+    const mismatchHtml = mismatch
+        ? `<div style="margin-top:4px;color:#b71c1c">🚨 FAX原文の読み取りは <b>${ocrDir}</b> ですが、マッチ結果は <b>${dir}</b> です。<b>方面が食い違っています。</b></div>`
+        : '';
+    const pairRows = getDirectionPairs(name).map(p =>
+        `<div style="margin-top:6px;padding:6px 8px;background:#fff;border:1px solid #ef9a9a;border-radius:4px;cursor:pointer"
+              onclick="selectDirectionPair(${pageIdx}, '${(p.name || '').replace(/'/g, "\\'")}')">↔ ${highlightDirection(p.name)}<br>
+              <span style="font-size:12px;color:#555;font-weight:normal">コード:${p.nohinsaki_code || '-'} / ${p.address || '住所不明'} / TEL:${p.tel || '-'}</span></div>`
+    ).join('');
+    return `<div id="directionAlertBanner-${pageIdx}" style="background:#FFF3E0;border:2px solid #EF6C00;color:#E65100;padding:10px 14px;border-radius:6px;margin-bottom:10px;font-size:14px;font-weight:bold;line-height:1.6">
+        ⚠️ 上り/下り 要確認: ${highlightDirection(name)}（コード:${pr.ddc_match.nohinsaki_code || '-'}）
+        ${mismatchHtml}
+        <div style="font-size:12px;font-weight:normal;color:#795548;margin-top:2px">上り/下りは別の納品先コード・別の請求先です。FAX原本と見比べて方面を確認してください。対の納品先はクリックで切替できます。</div>
+        ${pairRows}
+        <div style="margin-top:8px"><button onclick="confirmDirection(${pageIdx})" style="padding:5px 14px;background:#EF6C00;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px">この方面（${dir}）で確定</button></div>
+    </div>`;
+}
+function refreshDirectionAlertBanner(pageIdx) {
+    const el = document.getElementById(`directionAlertBanner-${pageIdx}`);
+    const html = renderDirectionAlertBannerHtml(pageIdx);
+    if (el) {
+        if (html) {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html;
+            el.replaceWith(tmp.firstChild);
+        } else {
+            el.remove();
+        }
+    } else if (html) {
+        const panel = document.getElementById('rightPanel');
+        if (panel) panel.insertAdjacentHTML('afterbegin', html);
+    }
+}
+function confirmDirection(pageIdx) {
+    const pr = pageResults[pageIdx];
+    if (!pr || !pr.ddc_match) return;
+    pr._directionConfirmed = pr.ddc_match.name;
+    pr.ddc_match.low_confidence = false;
+    const badge = document.getElementById(`ddcBadge-${pageIdx}`);
+    if (badge) { badge.className = 'badge badge-ok'; badge.textContent = 'OK'; }
+    refreshDirectionAlertBanner(pageIdx);
+}
+function selectDirectionPair(pageIdx, name) {
+    selectDdc(pageIdx, name);
+    const input = document.getElementById(`ddcSearch-${pageIdx}`);
+    if (input) input.value = name;
+    confirmDirection(pageIdx);
+}
+
+// ─── 賞味期限ガード（期限逆転・残存日数不足） ───
+// 判定はサーバー /api/check_expiry（確定済みスナップショット＝DB実績との照合）。
+// 出荷元倉庫や、手入力/メモリ自動適用の別に関係なく同じ経路で効く。
+const expiryCheckTimers = {};
+function buildExpiryCheckPayload(pageIdx) {
+    const pr = pageResults[pageIdx];
+    if (!pr || pr.error) return null;
+    const ocr = pr.ocr_raw || {};
+    const ddc = pr.ddc_match || {};
+    return {
+        page: pr.page,
+        partner_name: ocr.sender || '',
+        delivery_location_code: ddc.matched ? (ddc.code || ddc.nohinsaki_code || '') : '',
+        delivery_location_name: ddc.matched ? (ddc.name || '') : '',
+        delivery_date: ocr.delivery_date || '',
+        items: (pr.matched_items || []).map((it, i) => ({
+            index: i,
+            jan: it.jan || '',
+            master_name: it.master_name || it.ocr_name || '',
+            expiry_date: it.expiry_date || '',
+        })),
+    };
+}
+function expiryAlertKey(pr) { return JSON.stringify(pr._expiryAlerts || []); }
+function hasUnackedExpiryAlerts(pr) {
+    return !!(pr && (pr._expiryAlerts || []).length && expiryAlertKey(pr) !== pr._expiryAckKey);
+}
+async function runExpiryCheck(pageIdxs) {
+    const pages = pageIdxs.map(buildExpiryCheckPayload).filter(Boolean);
+    if (!pages.length) return;
+    try {
+        const res = await fetch('/api/check_expiry', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pages, exclude_order_id: (draftMode && draftMode.draft_id) || null }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        for (const p of (data.pages || [])) {
+            const idx = pageResults.findIndex(pr => pr && pr.page === p.page);
+            if (idx < 0) continue;
+            pageResults[idx]._expiryAlerts = p.alerts || [];
+            refreshExpiryAlertBanner(idx);
+            applyExpiryInputStyles(idx);
+        }
+    } catch (e) {
+        console.warn('check_expiry failed', e);
+    }
+}
+function scheduleExpiryCheck(pageIdx) {
+    clearTimeout(expiryCheckTimers[pageIdx]);
+    expiryCheckTimers[pageIdx] = setTimeout(() => runExpiryCheck([pageIdx]), 300);
+}
+function applyExpiryInputStyles(pageIdx) {
+    const pr = pageResults[pageIdx];
+    if (!pr) return;
+    const bad = new Set((pr._expiryAlerts || []).map(a => a.item_index));
+    document.querySelectorAll(`input[type="date"][data-page="${pageIdx}"][data-item]`).forEach(el => {
+        const i = parseInt(el.dataset.item);
+        if (bad.has(i)) { el.style.border = '2px solid #c62828'; el.style.background = '#FFEBEE'; }
+        else { el.style.border = ''; el.style.background = ''; }
+    });
+}
+function describeExpiryAlert(a) {
+    if (a.type === 'reversal') {
+        const where = [a.reference_location, a.reference_warehouse ? a.reference_warehouse + '出荷' : ''].filter(Boolean).join('・');
+        return `🔁 <b>${a.product_name || a.jan}</b>: 賞味期限 <b>${a.expiry_date}</b> は過去出荷の <b>${a.reference_expiry}</b>（${a.scope}スコープ${where ? '・' + where : ''}）より <b>${a.days_behind}日古い</b>です（期限逆転）`;
+    }
+    return `⏳ <b>${a.product_name || a.jan}</b>: 納品日 ${a.delivery_date} 時点の残存 <b>${a.remaining_days}日</b> は最低 ${a.min_remaining_days}日 を下回ります`;
+}
+function renderExpiryAlertBannerHtml(pageIdx) {
+    const pr = pageResults[pageIdx];
+    if (!hasUnackedExpiryAlerts(pr)) return '';
+    const lines = pr._expiryAlerts.map(a => `<div>${describeExpiryAlert(a)}</div>`).join('');
+    return `<div id="expiryAlertBanner-${pageIdx}" style="background:#FFEBEE;border:2px solid #c62828;color:#b71c1c;padding:10px 14px;border-radius:6px;margin-bottom:10px;font-size:14px;font-weight:bold;line-height:1.6">
+        ⚠️ 賞味期限 要確認
+        ${lines}
+        <div style="font-size:12px;font-weight:normal;color:#795548;margin-top:2px">納品先では前回より古い賞味期限は受け付けられません（入荷拒否→再配送費の実例あり）。出荷ロットと期限を確認してください。</div>
+        <div style="margin-top:8px"><button onclick="ackExpiryAlerts(${pageIdx})" style="padding:5px 14px;background:#c62828;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px">確認済み（この期限で進める）</button></div>
+    </div>`;
+}
+function refreshExpiryAlertBanner(pageIdx) {
+    const el = document.getElementById(`expiryAlertBanner-${pageIdx}`);
+    const html = renderExpiryAlertBannerHtml(pageIdx);
+    if (el) {
+        if (html) {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html;
+            el.replaceWith(tmp.firstChild);
+        } else {
+            el.remove();
+        }
+    } else if (html) {
+        const panel = document.getElementById('rightPanel');
+        if (panel) panel.insertAdjacentHTML('afterbegin', html);
+    }
+}
+function ackExpiryAlerts(pageIdx) {
+    const pr = pageResults[pageIdx];
+    if (!pr) return;
+    pr._expiryAckKey = expiryAlertKey(pr);
+    refreshExpiryAlertBanner(pageIdx);
+}
+
 // ─── 二重梱包 不可 DDC ───
 // この納品先コードに対しては二重梱包ボタンを無効化し、強制的に「通常」固定にする
 const NO_DOUBLE_PACK_DDC_CODES = [
@@ -3814,7 +4163,7 @@ function renderPage(idx) {
     } else {
         // 通常: PDF→画像化したものを img で表示
         previewImg.style.display = '';
-        previewImg.src = `/api/page_image/${sessionId}/${pr.page}`;
+        previewImg.src = `/api/page_image/${sessionId}/${pr.image_page || pr.page}`;
     }
 
     const panel = document.getElementById('rightPanel');
@@ -3827,8 +4176,11 @@ function renderPage(idx) {
     const ocr = pr.ocr_raw;
     const ddc = pr.ddc_match;
     const items = pr.matched_items;
-    const lowConf = ddc.low_confidence || false;
     const matched = ddc.matched || false;
+    // 方面（上り/下り）付きは、DB復元ドラフト等で low_confidence が未設定でも
+    // 明示確認まで要確認バッジにする（direction_guard と同じ決定的ルール）
+    const dirUnconfirmed = matched && getDirection(ddc.name || '') && pr._directionConfirmed !== ddc.name;
+    const lowConf = ddc.low_confidence || dirUnconfirmed || false;
     let status = matched ? (lowConf ? '要確認' : 'OK') : 'NG';
     let badgeClass = status === 'OK' ? 'badge-ok' : status === '要確認' ? 'badge-review' : 'badge-ng';
 
@@ -3924,6 +4276,8 @@ function renderPage(idx) {
 
     panel.innerHTML = `
     ${renderLotAlertBannerHtml(idx)}
+    ${renderDirectionAlertBannerHtml(idx)}
+    ${renderExpiryAlertBannerHtml(idx)}
     <div class="card">
         <h3>注文情報 <span class="badge ${badgeClass}" id="ddcBadge-${idx}">${status}</span></h3>
         <div class="field-grid">
@@ -3959,6 +4313,7 @@ function renderPage(idx) {
         </div>
         ${candidatesHtml}
         <div style="margin-top:8px;font-size:14px;color:#888;" id="ddcInfo-${idx}">
+            ${getDirection(ddc.name || '') ? '<span style="margin-right:8px">方面: ' + highlightDirection('（' + getDirection(ddc.name) + '）') + '</span>' : ''}
             ${ddc.address ? '住所: ' + ddc.address : ''}
             ${ddc.tel ? ' / TEL: ' + ddc.tel : ''}
         </div>
@@ -3971,6 +4326,9 @@ function renderPage(idx) {
         </table>
         <button onclick="addProductRow(${idx})" style="margin-top:8px;padding:6px 16px;background:#1565C0;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:14px">＋ 商品追加</button>
     </div>`;
+    // 描画時点の期限（メモリ自動適用分を含む）で賞味期限ガードを走らせる
+    applyExpiryInputStyles(idx);
+    scheduleExpiryCheck(idx);
 }
 
 // ─── DDC Search ───
@@ -4043,12 +4401,14 @@ function onDdcBlur(pageIdx, el) {
         pr.ddc_match.postal = '';
         pr.ddc_match.nohinsaki_code = '';
         pr.ddc_match.torihikisaki_code = '';
+        pr._directionConfirmed = null;
         // UI を更新
         const info = document.getElementById(`ddcInfo-${pageIdx}`);
         if (info) info.textContent = '';
         const badge = document.getElementById(`ddcBadge-${pageIdx}`);
         if (badge) { badge.className = 'badge badge-ng'; badge.textContent = 'NG'; }
         refreshLotAlertBanner(pageIdx);
+        refreshDirectionAlertBanner(pageIdx);
     }, 150);  // ドロップダウンのクリック処理を優先するための遅延
 }
 
@@ -4076,13 +4436,22 @@ function selectDdc(pageIdx, name) {
         pageResults[pageIdx].ddc_match.postal = entry.postal || '';
         pageResults[pageIdx]._userDdc = name;
 
-        document.getElementById(`ddcInfo-${pageIdx}`).textContent =
-            `住所: ${entry.address} / TEL: ${entry.tel}`;
+        const dirChip = getDirection(name)
+            ? `<span style="margin-right:8px">方面: ${highlightDirection('（' + getDirection(name) + '）')}</span>` : '';
+        document.getElementById(`ddcInfo-${pageIdx}`).innerHTML =
+            `${dirChip}住所: ${entry.address} / TEL: ${entry.tel}`;
         const badge = document.getElementById(`ddcBadge-${pageIdx}`);
         if (badge) { badge.className = 'badge badge-ok'; badge.textContent = 'OK'; }
+        // 方面（上り/下り）付き納品先: 明示確認まで要確認に戻す
+        if (getDirection(name) && pageResults[pageIdx]._directionConfirmed !== name) {
+            pageResults[pageIdx].ddc_match.low_confidence = true;
+            if (badge) { badge.className = 'badge badge-review'; badge.textContent = '要確認'; }
+        }
         applyAutoRemarks(pageIdx);
         applyNoDoublePackRule(pageIdx);
         refreshLotAlertBanner(pageIdx);
+        refreshDirectionAlertBanner(pageIdx);
+        scheduleExpiryCheck(pageIdx);  // 納品先が変わると照合スコープも変わる
         recalculateShipping();
     }
 }
@@ -4105,6 +4474,7 @@ function editField(el) {
     const idx = parseInt(el.dataset.page);
     const field = el.dataset.field;
     pageResults[idx].ocr_raw[field] = el.value;
+    if (field === 'delivery_date') scheduleExpiryCheck(idx);  // 残存日数の再評価
 }
 
 function updateQty(el) {
@@ -4196,6 +4566,7 @@ function updateExpiry(el) {
         expiryMemory[name] = el.value;
         saveExpiryMemory();
     }
+    scheduleExpiryCheck(idx);
 }
 function toggleDoublePack(pageIdx, itemIdx, btn) {
     if (isNoDoublePackPage(pageIdx)) return;  // 不可DDCでは無視
@@ -4255,6 +4626,45 @@ async function doConfirm() {
                   + '\n\nこのまま確定すると、NE/COOLA CSV の住所・郵便番号・電話番号が空欄になります。\n'
                   + '候補から正しい納品先を選び直してから確定するのを推奨します。\n\n'
                   + 'このまま確定しますか？';
+        if (!confirm(msg)) return;
+    }
+
+    // 上り/下り 未確認ページの確認ゲート（OCR方面誤読による誤納品・請求先違いの防止）
+    const directionPages = [];
+    (pageResults || []).forEach((pr, i) => {
+        if (!pr || pr.error) return;
+        const dm = pr.ddc_match || {};
+        if (!dm.matched) return;
+        const dir = getDirection(dm.name || '');
+        if (dir && pr._directionConfirmed !== dm.name) {
+            directionPages.push(`P.${i + 1} ${dm.name}（方面: ${dir}）`);
+        }
+    });
+    if (directionPages.length > 0) {
+        const msg = '⚠️ （上り）（下り）を含む納品先で、方面の確認が済んでいません:\n\n'
+                  + directionPages.join('\n')
+                  + '\n\n上り/下りは別の納品先コード・別の請求先です。\n'
+                  + 'FAX原本と方面が一致しているか確認しましたか？\n\n'
+                  + '確認済みとして確定しますか？';
+        if (!confirm(msg)) return;
+    }
+
+    // 賞味期限ゲート: 最新値で全ページ照合し、未確認のアラートがあれば一度止める
+    await runExpiryCheck(pageResults.map((_, i) => i));
+    const expiryPages = [];
+    (pageResults || []).forEach((pr, i) => {
+        if (!hasUnackedExpiryAlerts(pr)) return;
+        const parts = pr._expiryAlerts.map(a => a.type === 'reversal'
+            ? `${a.product_name || a.jan} ${a.expiry_date} ＜ 前回 ${a.reference_expiry}（${a.scope}）`
+            : `${a.product_name || a.jan} 残存${a.remaining_days}日 ＜ 最低${a.min_remaining_days}日`);
+        expiryPages.push(`P.${i + 1}: ` + parts.join(' / '));
+    });
+    if (expiryPages.length > 0) {
+        const msg = '⚠️ 賞味期限の要確認があります:\n\n'
+                  + expiryPages.join('\n')
+                  + '\n\n前回より古い賞味期限は納品先で入荷拒否になります（再配送費の実例あり）。\n'
+                  + '出荷ロットと期限を確認しましたか？\n\n'
+                  + '確認済みとして確定しますか？';
         if (!confirm(msg)) return;
     }
 

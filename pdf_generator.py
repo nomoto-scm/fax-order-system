@@ -1,6 +1,7 @@
 """PDF generator - Sylvia v12 / Haruna final version (Windows compatible)"""
 import os
 import json
+import re
 import pandas as pd
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import mm
@@ -79,6 +80,66 @@ def safe_str(val):
 def tw(text, fs):
     from reportlab.pdfbase.pdfmetrics import stringWidth
     return stringWidth(str(text), FONT, fs)
+
+
+def wrap_lines(text, max_w, fs):
+    """max_w に収まるように text を行へ分割して返す（1文字ずつ詰める）。"""
+    text = safe_str(text).replace('\n', ' ')
+    if not text:
+        return []
+    lines, cur = [], ""
+    for ch in text:
+        if cur and tw(cur + ch, fs) > max_w:
+            lines.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def fit_lines(text, max_w, fs, max_lines=3, shrink=True):
+    """(実フォントサイズ, 行リスト) を返す。
+
+    shrink=True なら draw_clipped と同じく先に最大3pt まで縮小を試し、
+    それでも入らなければ折り返す。shrink=False は縮小せず折り返しのみ。
+    max_lines=None で行数無制限。
+    """
+    text = safe_str(text).replace('\n', ' ')
+    if not text:
+        return fs, []
+    if tw(text, fs) <= max_w:
+        return fs, [text]
+    if shrink:
+        for step in range(1, 4):
+            nfs = fs - step
+            if nfs < 6:
+                break
+            if tw(text, nfs) <= max_w:
+                return nfs, [text]
+        nfs = max(fs - 2, 6)
+    else:
+        nfs = fs
+    lines = wrap_lines(text, max_w, nfs)
+    if max_lines:
+        lines = lines[:max_lines]
+    return nfs, lines
+
+
+def draw_wrapped(c, text, x, y, max_w, fs, lh=None, max_lines=3, shrink=True, color=None):
+    """max_w で折り返して複数行描画し、描いた行数を返す。y は1行目のベースライン。"""
+    nfs, lines = fit_lines(text, max_w, fs, max_lines, shrink)
+    if not lines:
+        return 0
+    if lh is None:
+        lh = nfs + 3
+    if color is not None:
+        c.setFillColor(color)
+    c.setFont(FONT, nfs)
+    for i, ln in enumerate(lines):
+        c.drawString(x, y - i * lh, ln)
+    return len(lines)
 
 
 def draw_clipped(c, text, x, y, max_w, fs, lh=None):
@@ -376,8 +437,33 @@ def gen_sylvia_pdf(order, items, staff_name="伊藤"):
     return buf
 
 
+# ========== ファイル名生成 ==========
+# Windows/Google共有ドライブで使えない文字（納品先マスタに全角スペースや
+# 末尾の " が混じっている行があるため、ファイル名化する前に必ず通す）
+_FILENAME_NG = re.compile(r'[\\/:*?"<>|\r\n\t]')
+
+
+def sanitize_filename_part(text, fallback="不明"):
+    """ファイル名の一部として使える文字列に整える。"""
+    s = _FILENAME_NG.sub("", str(text or ""))
+    s = re.sub(r"[\s\u3000]+", " ", s).strip(" .")
+    return s or fallback
+
+
+def haruna_pdf_filename(dest_name, delivery_date, order_no, page_num):
+    """ハルナ発注書PDFのファイル名を組み立てる。
+
+    形式: 納品先名_納品日_ハルナ発注書_オーダーNO_pページ.pdf
+    例:   京浜ＤＤＣ_2026-08-20_ハルナ発注書_260810001_p1.pdf
+    """
+    dest = sanitize_filename_part(dest_name, "納品先不明")
+    ddate = sanitize_filename_part(delivery_date, "納品日不明")
+    ono = sanitize_filename_part(order_no, "オーダーNO不明")
+    return f"{dest}_{ddate}_ハルナ発注書_{ono}_p{page_num}.pdf"
+
+
 # ========== Haruna PDF ==========
-def gen_haruna_pdf(order, ddc, staff_name="伊藤"):
+def gen_haruna_pdf(order, ddc, staff_name="伊藤", items=None):
     """ハルナプロデュース様 発注書PDF生成。
 
     order に 'confirmed_at' キー（例: "2026-04-30 14:30"）を入れると、日付の右隣に
@@ -499,9 +585,19 @@ def gen_haruna_pdf(order, ddc, staff_name="伊藤"):
     y -= dest_row_h + 4
 
     # Palette info table (Haruna only)
-    info_cols = [(0, 50), (50, 60), (110, 88)]
+    # 用紙の使える幅 uw=273mm を使い切る（従来は198mmまでで右に75mm余っていた）
+    info_cols = [(0, 66), (66, 95), (161, 112)]
     info_hdr = ["バース予約", "パレット条件", "備考"]
-    info_h = 22
+    # 備考は長いと折り返るので、先に行数を測って枠の高さを決める
+    # （固定22ptのままだと2行目が枠外へはみ出して下の明細表に重なる）
+    _notes = safe_str(ddc.get('notes', ''))
+    _method = safe_str(ddc.get('method', ''))
+    bikou_text = " / ".join([p for p in (_notes, _method) if p])
+    BIKOU_W, BIKOU_FS, BIKOU_LH = 111 * mm, 10, 13
+    # 欄を広げたので縮小はせず、10pt のまま折り返す（小さくて読めない対策）
+    bikou_fs, bikou_lines = fit_lines(bikou_text, BIKOU_W, BIKOU_FS,
+                                      max_lines=4, shrink=False)
+    info_h = max(22, len(bikou_lines) * BIKOU_LH + 9)
 
     c.setFillColor(HAR_LIGHT)
     c.rect(ml, y - 16, uw, 16, fill=True, stroke=False)
@@ -514,24 +610,20 @@ def gen_haruna_pdf(order, ddc, staff_name="伊藤"):
 
     draw_table_row(c, ml, y, info_cols, uw, info_h)
     ty = cell_mid_y(y, info_h, 10)
-    draw_clipped(c, safe_str(ddc.get('berse', '無')), ml + pad, ty, 49 * mm, 10)
+    draw_clipped(c, safe_str(ddc.get('berse', '無')), ml + pad, ty, 65 * mm, 10)
     # パレット条件: 値 + JPRコード（あれば併記）
     palette = safe_str(ddc.get('palette', ''))
     jpr = safe_str(ddc.get('jpr', ''))
     palette_text = palette
     if jpr:
         palette_text = (palette + " / " if palette else "") + "JPR：%s" % jpr
-    draw_clipped(c, palette_text, ml + 50 * mm + pad, ty, 59 * mm, 10)
-    # 備考: haruna_conditions.notes（固定備考）+ 納品方法
-    notes = safe_str(ddc.get('notes', ''))
-    method = safe_str(ddc.get('method', ''))
-    bikou_parts = []
-    if notes:
-        bikou_parts.append(notes)
-    if method:
-        bikou_parts.append(method)
-    if bikou_parts:
-        draw_clipped(c, " / ".join(bikou_parts), ml + 110 * mm + pad, ty, 87 * mm, 10)
+    draw_clipped(c, palette_text, ml + 66 * mm + pad, ty, 94 * mm, 10)
+    # 備考: haruna_conditions.notes（固定備考）+ 納品方法。複数行は枠内で上下中央に置く
+    if bikou_lines:
+        block_top = ty + (len(bikou_lines) - 1) * BIKOU_LH / 2.0
+        c.setFont(FONT, bikou_fs)
+        for i, ln in enumerate(bikou_lines):
+            c.drawString(ml + 161 * mm + pad, block_top - i * BIKOU_LH, ln)
     y -= info_h + 6
 
     # Product table
@@ -553,20 +645,47 @@ def gen_haruna_pdf(order, ddc, staff_name="伊藤"):
     c.setFillColor(colors.black)
     y -= prod_hdr_h
 
-    qty = order['quantity']
-    bara = qty * 24
-    bg = colors.HexColor("#EBF5FB")
-    draw_table_row(c, ml, y, prod_cols, uw, prod_row_h, fill_color=bg)
-    ty = cell_mid_y(y, prod_row_h, 11)
-    draw_clipped(c, "2Water Ceramide", ml + prod_cols[0][0] * mm + pad, ty, 89 * mm, 12)
-    draw_clipped(c, "500ml\xd724本", ml + prod_cols[1][0] * mm + pad, ty, 29 * mm, 10)
-    draw_clipped(c, "24本/cs", ml + prod_cols[2][0] * mm + pad, ty, 25 * mm, 10)
-    c.setFont(FONT, 13)
-    c.drawRightString(ml + (prod_cols[3][0] + prod_cols[3][1]) * mm - pad, ty, str(qty))
-    c.drawRightString(ml + (prod_cols[4][0] + prod_cols[4][1]) * mm - pad, ty, "{:,}".format(bara))
-    y -= prod_row_h
+    # 明細は items（商品マスタでマッチ済み）から組む。
+    # items が無い呼び出しは従来どおり order['quantity'] の1行にフォールバックする。
+    rows = []
+    for it in (items or []):
+        try:
+            iq = int(it.get("quantity", 0) or 0)
+        except (ValueError, TypeError):
+            iq = 0
+        try:
+            cq = int(it.get("case_quantity", 0) or 0)
+        except (ValueError, TypeError):
+            cq = 0
+        cq = cq or 24
+        rows.append({
+            "name": safe_str(it.get("master_name", "")),
+            "spec": safe_str(it.get("spec", "")),
+            "pack": safe_str(it.get("pack", "")),
+            "qty": iq,
+            "bara": iq * cq,
+        })
+    if not rows:
+        qty = int(order.get('quantity', 0) or 0)
+        rows.append({
+            "name": "2Water Ceramide", "spec": "500ml\xd724本",
+            "pack": "24本/cs", "qty": qty, "bara": qty * 24,
+        })
 
-    for _ in range(3):
+    bara = sum(r["bara"] for r in rows)
+    bg = colors.HexColor("#EBF5FB")
+    for r in rows:
+        draw_table_row(c, ml, y, prod_cols, uw, prod_row_h, fill_color=bg)
+        ty = cell_mid_y(y, prod_row_h, 11)
+        draw_clipped(c, r["name"], ml + prod_cols[0][0] * mm + pad, ty, 89 * mm, 12)
+        draw_clipped(c, r["spec"], ml + prod_cols[1][0] * mm + pad, ty, 29 * mm, 10)
+        draw_clipped(c, r["pack"], ml + prod_cols[2][0] * mm + pad, ty, 25 * mm, 10)
+        c.setFont(FONT, 13)
+        c.drawRightString(ml + (prod_cols[3][0] + prod_cols[3][1]) * mm - pad, ty, str(r["qty"]))
+        c.drawRightString(ml + (prod_cols[4][0] + prod_cols[4][1]) * mm - pad, ty, "{:,}".format(r["bara"]))
+        y -= prod_row_h
+
+    for _ in range(max(0, 4 - len(rows))):
         draw_table_row(c, ml, y, prod_cols, uw, prod_row_h)
         y -= prod_row_h
 
@@ -579,9 +698,11 @@ def gen_haruna_pdf(order, ddc, staff_name="伊藤"):
     har_remarks = safe_str(order.get('remarks', ''))
     if har_remarks:
         y -= 30
-        c.setFillColor(HAR_PRIMARY)
-        c.setFont(FONT, 14)
-        c.drawString(ml, y, "※ %s" % har_remarks)
+        # 用紙幅で折り返す（従来は1行固定で、長文が紙の外へはみ出していた）
+        REM_LH = 19
+        n = draw_wrapped(c, "※ %s" % har_remarks, ml, y, uw, 14,
+                         lh=REM_LH, max_lines=None, shrink=False, color=HAR_PRIMARY)
+        y -= max(0, n - 1) * REM_LH
         c.setFillColor(colors.black)
 
     c.showPage()
@@ -833,7 +954,7 @@ def gen_partner_pdf(
     return buf
 
 
-_PARTNER_DEFAULT_REMARKS = "別紙添付の貼り紙を外装箱に貼り付けて出荷をお願いします。"
+_PARTNER_DEFAULT_REMARKS = "貼り紙と納品書の添付は不要です"
 
 
 def gen_nomura_pdf(order, items, staff_name="伊藤"):

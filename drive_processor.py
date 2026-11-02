@@ -40,7 +40,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() in ('cp932', 'shift_jis',
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from ocr_module import process_fax_pdf
-from pdf_generator import gen_sylvia_pdf, gen_haruna_pdf
+from pdf_generator import gen_sylvia_pdf, gen_haruna_pdf, haruna_pdf_filename
 from shipping_judge import judge_shipping, judge_warehouse, check_lot_alert, check_lead_time_alert
 from supabase_client import insert_fax_order, check_fax_order_exists
 from drive_api_client import get_drive_client, LocalDriveClient, DriveFile
@@ -334,6 +334,15 @@ def move_to_processed(pdf_path: str, mode: str = "new") -> str:
     else:
         processed_folder = NEW_PROCESSED_FOLDER
     return _move_pdf_with_meta_local(pdf_path, processed_folder)
+
+
+def is_ocr_total_failure(results) -> bool:
+    """全ページが OCR エラーなら True（＝エラーフォルダへ退避すべき）。
+
+    OCR は例外ではなく {"error": ...} を返すため、API障害などで全ページ
+    失敗しても解析成功として扱われ、処理済みへ流れてしまっていた。
+    """
+    return bool(results) and all("error" in r for r in results)
 
 
 def move_to_error(pdf_path: str) -> str:
@@ -688,8 +697,10 @@ def process_file(pdf_path, staff_name="伊藤", remarks="", source_label="FAX", 
                     "method": ddc.get("method", "") if ddc_matched else "",
                     "notes": ddc.get("notes", "") if ddc_matched else "",
                 }
-                pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name)
-                haruna_pdf_name = f"ハルナ_{base_name}_p{page_num}.pdf"
+                pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name, items=haruna_items)
+                haruna_pdf_name = haruna_pdf_filename(
+                    dest_name, ocr.get("delivery_date", ""), order_no, page_num
+                )
                 out_path = os.path.join(OUTPUT_FOLDER, haruna_pdf_name)
                 with open(out_path, "wb") as f:
                     f.write(pdf_buf.read())
@@ -854,6 +865,21 @@ def run_import(
         else:
             file_source_channel = source_channel  # PDF はデフォルトで efax
 
+        # PALTAC は1受注につき2通届く。
+        #   *_HAC_*.csv … 真の受注。通常どおり取り込む
+        #   *_SIR_*.csv … TWOが受注を確定した後に届く「確定済み」の自動通知
+        # SIR は元の受注と発注番号・納品日・明細が完全に一致するため、取り込むと
+        # 確定画面に再送そっくりの伝票が並び、確定すると二重受注になる。
+        # （2026-09-25 RDC横浜 44581450 が SIR。SCM-306 で「再送＝二重出荷の恐れ」として上がった）
+        # 受注ではないのでエラーではなく、そのまま処理済みへ送る。
+        if ext == ".csv" and "_SIR_" in fname.upper():
+            print(f"\n⏭️  PALTAC 確定済み通知（SIR）のため取込対象外: {fname}")
+            if mode == "new":
+                moved = move_to_processed(file_path, mode=mode)
+                print(f"  → 処理済みへ移動: {os.path.basename(moved)}")
+            files_log.append({"file": fname, "status": "paltac_sir_skipped"})
+            continue
+
         # 解析処理: PDF→OCR / CSV→parse_paltac_csv
         try:
             if ext == ".pdf":
@@ -882,6 +908,20 @@ def run_import(
                 print(f"  → エラーフォルダへ移動: {os.path.basename(moved)}")
                 moved_to_error_count += 1
             files_log.append({"file": fname, "status": "parse_error", "error": str(e)})
+            continue
+
+        # OCRが全ページ失敗したファイルはエラーフォルダへ退避する。
+        # （従来は「エラーでないページ数 > 0」を条件にしていたため、全滅時に
+        #   判定が素通りして処理済みへ流れ、障害に気づけなかった）
+        if is_ocr_total_failure(results):
+            msgs = sorted({str(r.get("error"))[:120] for r in results})
+            print(f"\n❌ OCR全ページ失敗: {fname}: {' / '.join(msgs)}")
+            if mode == "new":
+                moved = move_to_error(file_path)
+                print(f"  → エラーフォルダへ移動: {os.path.basename(moved)}")
+                moved_to_error_count += 1
+            files_log.append({"file": fname, "status": "ocr_all_errors",
+                              "error": " / ".join(msgs)})
             continue
 
         # Phase 4 (D1): drive_processor では発注書PDF生成しない。
@@ -1086,8 +1126,10 @@ def _process_results(results, pdf_path, staff_name="伊藤", remarks="", model="
                     "method": ddc.get("method", "") if ddc_matched else "",
                     "notes": ddc.get("notes", "") if ddc_matched else "",
                 }
-                pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name)
-                haruna_pdf_name = f"ハルナ_{base_name}_p{page_num}.pdf"
+                pdf_buf = gen_haruna_pdf(order_data, ddc_data, staff_name, items=haruna_items)
+                haruna_pdf_name = haruna_pdf_filename(
+                    dest_name, ocr.get("delivery_date", ""), order_no, page_num
+                )
                 out_path = os.path.join(OUTPUT_FOLDER, haruna_pdf_name)
                 with open(out_path, "wb") as f:
                     f.write(pdf_buf.read())
